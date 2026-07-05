@@ -21,6 +21,18 @@ export interface RenderedPage {
   data_url: string;
 }
 
+export interface ObjInfo {
+  page: number;
+  index: number;
+  kind: string;
+  text: string;
+  font_size: number;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+
 export interface FieldInfo {
   page: number;
   index: number;
@@ -92,6 +104,12 @@ export const api = {
     invoke<DocInfo>("add_header_footer", { id, top, align, template }),
   setDocumentPassword: (id: number, password: string | null) =>
     invoke<DocInfo>("set_document_password", { id, password }),
+  listPageObjects: (id: number, page: number) =>
+    invoke<ObjInfo[]>("list_page_objects", { id, page }),
+  setTextObject: (id: number, page: number, index: number, text: string) =>
+    invoke<ObjInfo[]>("set_text_object", { id, page, index, text }),
+  deletePageObject: (id: number, page: number, index: number) =>
+    invoke<ObjInfo[]>("delete_page_object", { id, page, index }),
   listFormFields: (id: number, page: number) =>
     invoke<FieldInfo[]>("list_form_fields", { id, page }),
   setFormField: (id: number, page: number, index: number, value: string) =>

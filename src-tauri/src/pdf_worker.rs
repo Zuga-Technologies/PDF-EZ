@@ -40,6 +40,20 @@ pub struct CompressOutcome {
 }
 
 #[derive(Serialize, Clone)]
+pub struct ObjInfo {
+    pub page: u16,
+    pub index: u16,
+    /// "Text" | "Image" — other object kinds aren't exposed for editing.
+    pub kind: String,
+    pub text: String,
+    pub font_size: f32,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+#[derive(Serialize, Clone)]
 pub struct FieldInfo {
     pub page: u16,
     /// Index of the widget annotation hosting this field on its page.
@@ -167,6 +181,24 @@ pub enum PdfRequest {
         id: u32,
         password: Option<String>,
         reply: Sender<Result<DocInfo, String>>,
+    },
+    ListPageObjects {
+        id: u32,
+        page: u16,
+        reply: Sender<Result<Vec<ObjInfo>, String>>,
+    },
+    SetTextObject {
+        id: u32,
+        page: u16,
+        index: u16,
+        text: String,
+        reply: Sender<Result<Vec<ObjInfo>, String>>,
+    },
+    DeletePageObject {
+        id: u32,
+        page: u16,
+        index: u16,
+        reply: Sender<Result<Vec<ObjInfo>, String>>,
     },
     ListFormFields {
         id: u32,
@@ -384,6 +416,15 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                             });
                         let _ = reply.send(result);
                     }
+                    PdfRequest::ListPageObjects { id, page, reply } => {
+                        let _ = reply.send(list_page_objects(&docs, id, page));
+                    }
+                    PdfRequest::SetTextObject { id, page, index, text, reply } => {
+                        let _ = reply.send(set_text_object(&mut docs, id, page, index, &text));
+                    }
+                    PdfRequest::DeletePageObject { id, page, index, reply } => {
+                        let _ = reply.send(delete_page_object(&mut docs, id, page, index));
+                    }
                     PdfRequest::ListFormFields { id, page, reply } => {
                         let _ = reply.send(list_form_fields(&docs, id, page));
                     }
@@ -436,6 +477,9 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::SetDocumentPassword { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddWatermark { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddHeaderFooter { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ListPageObjects { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::SetTextObject { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::DeletePageObject { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListFormFields { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SetFormField { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SearchDocument { reply, .. } => drop(reply.send(Err(e))),
@@ -772,6 +816,102 @@ fn save_doc(
 
     entry.path = target;
     Ok(make_info(id, entry))
+}
+
+// ---- object-level editing (edit text & images) ----
+
+fn obj_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<ObjInfo>, String> {
+    let page = doc
+        .pages()
+        .get(page_index.into())
+        .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+    let mut out = Vec::new();
+    for (i, object) in page.objects().iter().enumerate() {
+        let (kind, text, font_size) = if let Some(text_obj) = object.as_text_object() {
+            ("Text", text_obj.text(), text_obj.scaled_font_size().value)
+        } else if object.as_image_object().is_some() {
+            ("Image", String::new(), 0.0)
+        } else {
+            continue;
+        };
+        let Ok(bounds) = object.bounds() else { continue };
+        out.push(ObjInfo {
+            page: page_index,
+            index: i as u16,
+            kind: kind.to_string(),
+            text,
+            font_size,
+            left: bounds.left().value,
+            bottom: bounds.bottom().value,
+            right: bounds.right().value,
+            top: bounds.top().value,
+        });
+    }
+    Ok(out)
+}
+
+fn list_page_objects(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    page: u16,
+) -> Result<Vec<ObjInfo>, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+    obj_infos(doc, page)
+}
+
+fn set_text_object(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    index: u16,
+    text: &str,
+) -> Result<Vec<ObjInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let mut object = page
+            .objects()
+            .get(index.into())
+            .map_err(|e| format!("Object not found: {e}"))?;
+        let text_obj = object
+            .as_text_object_mut()
+            .ok_or("That object is not text")?;
+        text_obj
+            .set_text(text)
+            .map_err(|e| format!("Could not edit text (the font may not contain the new characters): {e}"))?;
+        page.regenerate_content().map_err(|e| format!("Could not update the page: {e}"))?;
+    }
+    obj_infos(&entry.doc, page_index)
+}
+
+fn delete_page_object(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    index: u16,
+) -> Result<Vec<ObjInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let removed = page
+            .objects_mut()
+            .remove_object_at_index(index.into())
+            .map_err(|e| format!("Could not delete object: {e}"))?;
+        page.regenerate_content().map_err(|e| format!("Could not update the page: {e}"))?;
+        // Dropping the removed object double-frees inside pdfium (native AV,
+        // verified empirically) — deliberately leak the tiny wrapper instead.
+        std::mem::forget(removed);
+    }
+    obj_infos(&entry.doc, page_index)
 }
 
 // ---- watermark / header-footer ----
@@ -1468,6 +1608,49 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Object edit: rewrite a text object, delete one, persist through save.
+    #[test]
+    fn edit_objects_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !fixture.exists() {
+            eprintln!("Alpha.pdf not generated — skipping");
+            return;
+        }
+        let tmp = std::env::temp_dir().join("zugapdf-test-edit.pdf");
+        std::fs::copy(&fixture, &tmp).unwrap();
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+
+        let objects = list_page_objects(&docs, info.id, 0).unwrap();
+        let label = objects.iter().find(|o| o.text.contains("Alpha1")).expect("big label object");
+        assert_eq!(label.kind, "Text");
+        assert!(label.font_size > 100.0, "center label is 120pt");
+
+        set_text_object(&mut docs, info.id, 0, label.index, "REWRITTEN").unwrap();
+        let objects = list_page_objects(&docs, info.id, 0).unwrap();
+        assert!(objects.iter().any(|o| o.text == "REWRITTEN"), "object text updated");
+        render_page(&docs, info.id, 0, 300, true).unwrap();
+        assert_eq!(search_document(&docs, info.id, "REWRITTEN", true).unwrap().len(), 1);
+        assert!(search_document(&docs, info.id, "Alpha1", true).unwrap().is_empty());
+
+        // Delete the header text object (contains "page 1").
+        let objects = list_page_objects(&docs, info.id, 0).unwrap();
+        let header = objects.iter().find(|o| o.text.contains("page 1")).unwrap();
+        let remaining = delete_page_object(&mut docs, info.id, 0, header.index).unwrap();
+        assert_eq!(remaining.len(), objects.len() - 1);
+
+        save_doc(&mut docs, info.id, None, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        assert!(!search_document(&docs, reopened.id, "REWRITTEN", true).unwrap().is_empty());
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// Watermark and header/footer add REAL text objects — provable by search.

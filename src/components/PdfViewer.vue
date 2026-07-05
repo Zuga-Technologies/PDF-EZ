@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type FieldInfo, type SearchHit } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type ObjInfo, type SearchHit } from "../lib/api";
 import Icon from "./Icon.vue";
 
 interface RenderSlot {
@@ -47,7 +47,7 @@ const THUMB_CSS_WIDTH = 132;
 
 // ---- annotation tools ----
 
-type Tool = "select" | "highlight" | "note" | "ink";
+type Tool = "select" | "highlight" | "note" | "ink" | "edit";
 const tool = ref<Tool>("select");
 const HIGHLIGHT_COLOR = { r: 255, g: 220, b: 60, a: 128 };
 const INK_COLOR = { r: 43, g: 74, b: 203, a: 255 };
@@ -98,6 +98,118 @@ async function applyHeaderFooter() {
     error.value = String(e);
   }
 }
+
+// ---- edit text & images ----
+const objectsByPage = ref<Map<number, ObjInfo[]>>(new Map());
+const objEditor = ref<{
+  page: number;
+  index: number;
+  value: string;
+  fontPx: number;
+  css: { left: string; top: string; width: string; height: string };
+} | null>(null);
+const selectedObj = ref<{
+  page: number;
+  index: number;
+  kind: string;
+  css: { left: string; top: string; width: string; height: string };
+} | null>(null);
+
+async function loadObjects(index: number, force = false) {
+  if (!doc.value || tool.value !== "edit") return;
+  if (!force && objectsByPage.value.has(index)) return;
+  try {
+    const objects = await api.listPageObjects(doc.value.id, index);
+    const next = new Map(objectsByPage.value);
+    next.set(index, objects);
+    objectsByPage.value = next;
+  } catch {
+    /* page shows without edit outlines */
+  }
+}
+
+function objCss(o: ObjInfo) {
+  const scale = POINTS_TO_CSS * zoom.value;
+  const pageH = doc.value!.pages[o.page].height;
+  return {
+    left: o.left * scale + "px",
+    top: (pageH - o.top) * scale + "px",
+    width: Math.max((o.right - o.left) * scale, 4) + "px",
+    height: Math.max((o.top - o.bottom) * scale, 4) + "px",
+  };
+}
+
+function handleEditClick(index: number, px: number, py: number): void {
+  const objects = objectsByPage.value.get(index) ?? [];
+  const hit = objects
+    .filter((o) => px >= o.left && px <= o.right && py >= o.bottom && py <= o.top)
+    .sort((a, b) => (a.right - a.left) * (a.top - a.bottom) - (b.right - b.left) * (b.top - b.bottom))[0];
+  if (!hit) {
+    objEditor.value = null;
+    selectedObj.value = null;
+    return;
+  }
+  if (hit.kind === "Text") {
+    selectedObj.value = null;
+    objEditor.value = {
+      page: index,
+      index: hit.index,
+      value: hit.text,
+      fontPx: hit.font_size * POINTS_TO_CSS * zoom.value,
+      css: objCss(hit),
+    };
+  } else {
+    objEditor.value = null;
+    selectedObj.value = { page: index, index: hit.index, kind: hit.kind, css: objCss(hit) };
+  }
+}
+
+async function submitObjEditor() {
+  const ed = objEditor.value;
+  objEditor.value = null;
+  if (!ed || !doc.value) return;
+  try {
+    const objects = await api.setTextObject(doc.value.id, ed.page, ed.index, ed.value);
+    const next = new Map(objectsByPage.value);
+    next.set(ed.page, objects);
+    objectsByPage.value = next;
+    dirty.value = true;
+    await refreshPage(ed.page);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+function onObjEditorBlur(event: FocusEvent) {
+  const oid = (event.target as HTMLElement).dataset.oid;
+  const ed = objEditor.value;
+  if (ed && oid === `${ed.page}:${ed.index}`) void submitObjEditor();
+}
+
+async function deleteSelectedObj() {
+  const sel = selectedObj.value;
+  selectedObj.value = null;
+  if (!sel || !doc.value) return;
+  try {
+    const objects = await api.deletePageObject(doc.value.id, sel.page, sel.index);
+    const next = new Map(objectsByPage.value);
+    next.set(sel.page, objects);
+    objectsByPage.value = next;
+    dirty.value = true;
+    await refreshPage(sel.page);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+watch(tool, (t) => {
+  if (t === "edit") {
+    for (const index of visiblePages) void loadObjects(index);
+  } else {
+    objEditor.value = null;
+    selectedObj.value = null;
+  }
+});
 
 // ---- protect (password) ----
 const protectOpen = ref(false);
@@ -371,6 +483,7 @@ async function renderSlot(slots: RenderSlot[], index: number, want: number, jpeg
 
 function renderPageIfStale(index: number) {
   void loadFields(index);
+  void loadObjects(index);
   const want = Math.round(cssWidth(index) * dpr());
   const slot = pages[index];
   if (slot && (!slot.url || slot.renderedWidth !== want)) {
@@ -414,6 +527,9 @@ function applyInfo(info: DocInfo) {
   selectedAnnot.value = null;
   fieldEditor.value = null;
   fieldsByPage.value = new Map();
+  objEditor.value = null;
+  selectedObj.value = null;
+  objectsByPage.value = new Map();
   undoStack.length = 0; // annotation indices are stale after any page op
   // Already-visible elements get no new intersection event; refresh them.
   for (const index of visiblePages) renderPageIfStale(index);
@@ -550,6 +666,13 @@ function onPagePointerDown(event: PointerEvent, index: number) {
     // Keep the page from taking focus — it would blur an opening field editor.
     event.preventDefault();
     void selectAnnotAt(event, index);
+    return;
+  }
+  if (tool.value === "edit") {
+    event.preventDefault();
+    const [cssX, cssY] = pagePoint(event);
+    const [px, py] = cssToPdf(index, cssX, cssY);
+    handleEditClick(index, px, py);
     return;
   }
   event.preventDefault();
@@ -851,7 +974,11 @@ function zoomOut() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (noteDraft.value || fieldEditor.value) return; // typing in an overlay input
+  if (noteDraft.value || fieldEditor.value || objEditor.value) return; // typing in an overlay
+  if (e.key === "Delete" && selectedObj.value) {
+    void deleteSelectedObj();
+    return;
+  }
   if (e.ctrlKey && e.key.toLowerCase() === "f") {
     e.preventDefault();
     searchInput.value?.focus();
@@ -1015,7 +1142,11 @@ onBeforeUnmount(() => {
         <button class="tool-item" :disabled="!doc || busy" @click="stampOpen = true">
           <Icon name="stamp" /> Watermark &amp; stamps
         </button>
-        <p class="tools-soon">Coming: Edit a PDF · Export a PDF · Scan &amp; OCR · Redact · Sign</p>
+        <button class="tool-item" :disabled="!doc || busy" @click="tool = tool === 'edit' ? 'select' : 'edit'">
+          <Icon name="type" /> Edit a PDF
+          <span v-if="tool === 'edit'" class="tool-state">on</span>
+        </button>
+        <p class="tools-soon">Coming: Export a PDF · Scan &amp; OCR · Redact · Sign</p>
       </aside>
 
       <aside v-if="doc && railOpen" ref="rail" class="rail">
@@ -1061,6 +1192,8 @@ onBeforeUnmount(() => {
           @click="tool = tool === 'note' ? 'select' : 'note'"><Icon name="sticky-note" /></button>
         <button class="iconbtn" :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)" aria-label="Draw tool"
           @click="tool = tool === 'ink' ? 'select' : 'ink'"><Icon name="pen" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'edit' }" title="Edit — click page text to rewrite it, images to delete" aria-label="Edit tool"
+          @click="tool = tool === 'edit' ? 'select' : 'edit'"><Icon name="type" /></button>
       </div>
 
       <div ref="scroller" class="well">
@@ -1145,6 +1278,43 @@ onBeforeUnmount(() => {
               @blur="onEditorBlur"
             />
 
+            <template v-if="tool === 'edit'">
+              <div
+                v-for="o in objectsByPage.get(index) ?? []"
+                :key="'o' + o.index"
+                class="obj-outline"
+                :class="{ image: o.kind === 'Image' }"
+                :style="objCss(o)"
+              ></div>
+            </template>
+
+            <input
+              v-if="objEditor && objEditor.page === index"
+              :key="'oe' + objEditor.page + ':' + objEditor.index"
+              :data-oid="objEditor.page + ':' + objEditor.index"
+              class="obj-editor"
+              v-model="objEditor.value"
+              :style="{ ...objEditor.css, fontSize: objEditor.fontPx + 'px' }"
+              v-focus
+              @pointerdown.stop
+              @keydown.enter.prevent="submitObjEditor"
+              @keydown.escape="objEditor = null"
+              @blur="onObjEditorBlur"
+            />
+
+            <div
+              v-if="selectedObj && selectedObj.page === index"
+              class="annot-selection"
+              :style="selectedObj.css"
+            >
+              <button
+                class="annot-delete"
+                :title="`Delete ${selectedObj.kind.toLowerCase()} (Del)`"
+                @pointerdown.stop
+                @click.stop="deleteSelectedObj"
+              ><Icon name="x" /></button>
+            </div>
+
             <template v-for="(h, hi) in searchHits" :key="'s' + hi">
               <div
                 v-if="h.page === index"
@@ -1169,7 +1339,7 @@ onBeforeUnmount(() => {
                 :title="`Delete ${selectedAnnot.kind.toLowerCase()} (Del)`"
                 @pointerdown.stop
                 @click.stop="deleteSelectedAnnot"
-              >×</button>
+              ><Icon name="x" /></button>
             </div>
 
             <template v-for="mark in pendingMarks" :key="mark.key">
@@ -1531,6 +1701,24 @@ button.danger { color: var(--danger); }
   border-radius: 2px;
   padding: 0 0.2rem;
 }
+.obj-outline {
+  position: absolute;
+  outline: 1px dashed rgba(125, 149, 242, 0.55);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.obj-outline.image { outline-color: rgba(230, 181, 104, 0.6); }
+.obj-editor {
+  position: absolute;
+  z-index: 6;
+  font-family: Helvetica, Arial, sans-serif;
+  background: #fff;
+  color: #111;
+  border: 2px solid var(--accent);
+  border-radius: 2px;
+  padding: 0;
+  min-width: 3rem;
+}
 .search-hit {
   position: absolute;
   background: rgba(255, 150, 40, 0.35);
@@ -1556,11 +1744,12 @@ button.danger { color: var(--danger); }
   width: 1.5rem;
   height: 1.5rem;
   padding: 0;
-  line-height: 1;
+  display: grid;
+  place-items: center;
   border-radius: 50%;
   background: var(--chrome);
   color: var(--danger);
-  font-size: 1rem;
+  font-size: 0.8rem;
 }
 .note-actions {
   display: flex;

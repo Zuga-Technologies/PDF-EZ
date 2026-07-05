@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
 use pdf_worker::{
-    AnnotInfo, CompressOutcome, DocInfo, FieldInfo, PdfRequest, PdfWorkerHandle, RenderedPage,
-    Rgba, SearchHit,
+    AnnotInfo, CompressOutcome, DocInfo, FieldInfo, ObjInfo, PdfRequest, PdfWorkerHandle,
+    RenderedPage, Rgba, SearchHit,
 };
 use tauri::Manager;
 
@@ -121,6 +121,36 @@ async fn set_document_password(
     password: Option<String>,
 ) -> Result<DocInfo, String> {
     engine_call(app, move |reply| PdfRequest::SetDocumentPassword { id, password, reply }).await
+}
+
+#[tauri::command]
+async fn list_page_objects(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+) -> Result<Vec<ObjInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::ListPageObjects { id, page, reply }).await
+}
+
+#[tauri::command]
+async fn set_text_object(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    index: u16,
+    text: String,
+) -> Result<Vec<ObjInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::SetTextObject { id, page, index, text, reply }).await
+}
+
+#[tauri::command]
+async fn delete_page_object(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    index: u16,
+) -> Result<Vec<ObjInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::DeletePageObject { id, page, index, reply }).await
 }
 
 #[tauri::command]
@@ -271,6 +301,9 @@ pub fn run() {
             add_header_footer,
             compress_document,
             search_document,
+            list_page_objects,
+            set_text_object,
+            delete_page_object,
             list_form_fields,
             set_form_field,
             merge_append,
