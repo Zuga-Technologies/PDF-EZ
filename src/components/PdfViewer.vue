@@ -131,6 +131,11 @@ async function renderSlot(slots: RenderSlot[], index: number, want: number, jpeg
   slot.loading = true;
   try {
     const rendered = await api.renderPage(doc.value.id, index, want, jpeg);
+    // Pre-decode before swapping src: assigning a big data-URL directly
+    // blanks the <img> for the decode duration (the "blink").
+    const pre = new Image();
+    pre.src = rendered.data_url;
+    await pre.decode().catch(() => {});
     slot.url = rendered.data_url;
     slot.renderedWidth = want;
   } catch (e) {
