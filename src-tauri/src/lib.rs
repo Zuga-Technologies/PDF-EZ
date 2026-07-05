@@ -1,3 +1,4 @@
+mod ap;
 mod license;
 mod pdf_worker;
 

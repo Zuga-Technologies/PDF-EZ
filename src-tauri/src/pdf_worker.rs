@@ -297,6 +297,10 @@ pub enum PdfRequest {
 struct OpenDoc {
     doc: PdfDocument<'static>,
     path: PathBuf,
+    /// Highlights created THIS session, keyed (page, annot index). They have
+    /// no appearance stream yet (pdfium can't write one), so the renderer
+    /// composites them; save writes real AP streams (ap.rs) and clears this.
+    session_highlights: std::collections::HashSet<(u16, u16)>,
     /// Password the in-memory document was loaded with. PDFium KEEPS that
     /// encryption in every snapshot it saves, so qpdf needs this to read
     /// snapshots. Fixed for the lifetime of the load.
@@ -417,7 +421,7 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let _ = reply.send(result);
                     }
                     PdfRequest::Save { id, path, reply } => {
-                        let result = save_doc(&mut docs, id, path, qpdf.as_deref());
+                        let result = save_doc(pdfium, &mut docs, id, path, qpdf.as_deref());
                         let _ = reply.send(result);
                     }
                     PdfRequest::ExportPages { id, dir, jpeg, dpi, reply } => {
@@ -565,6 +569,10 @@ fn open_doc(
     password: Option<String>,
 ) -> Result<DocInfo, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("Could not read file: {e}"))?;
+    // Give AP-less markup annotations real appearance streams before pdfium
+    // sees the bytes — highlights then render natively (encrypted bytes pass
+    // through and get fixed on the decrypted save path instead).
+    let bytes = crate::ap::fix_appearance_streams(bytes);
     let doc = pdfium
         .load_pdf_from_byte_vec(bytes, password.as_deref())
         .map_err(friendly_open_error)?;
@@ -572,7 +580,13 @@ fn open_doc(
     let id = *next_id;
     *next_id += 1;
     let password = password.filter(|p| !p.is_empty());
-    let entry = OpenDoc { doc, path, doc_password: password.clone(), save_password: password };
+    let entry = OpenDoc {
+        doc,
+        path,
+        doc_password: password.clone(),
+        save_password: password,
+        session_highlights: Default::default(),
+    };
     let info = make_info(id, &entry);
     docs.insert(id, entry);
     Ok(info)
@@ -594,7 +608,8 @@ fn render_page(
     target_width: u32,
     jpeg: bool,
 ) -> Result<RenderedPage, String> {
-    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+    let entry = docs.get(&id).ok_or("Document is not open")?;
+    let doc = &entry.doc;
     let page = doc
         .pages()
         .get(index.into())
@@ -613,7 +628,7 @@ fn render_page(
         .as_image()
         .map_err(|e| format!("Bitmap conversion failed: {e}"))?;
 
-    composite_highlights(&page, &mut image);
+    composite_highlights(&page, index, &entry.session_highlights, &mut image);
 
     let (width_px, height_px) = (image.width(), image.height());
     let mut buf = Cursor::new(Vec::new());
@@ -639,10 +654,16 @@ fn render_page(
     })
 }
 
-/// PDFium never synthesizes appearance streams for markup annotations, so an
-/// AP-less /Highlight renders as nothing (Acrobat synthesizes at open; we do
-/// the same at render). Multiply-blend each highlight rect onto the bitmap.
-fn composite_highlights(page: &PdfPage, image: &mut image::DynamicImage) {
+/// Highlights created THIS SESSION have no appearance stream yet (pdfium
+/// can't write one), so they'd render as nothing — multiply-blend them onto
+/// the bitmap. Highlights from opened/saved files carry real AP streams
+/// (ap.rs) and render natively, so they're skipped here.
+fn composite_highlights(
+    page: &PdfPage,
+    page_index: u16,
+    session: &std::collections::HashSet<(u16, u16)>,
+    image: &mut image::DynamicImage,
+) {
     use image::{GenericImage, GenericImageView};
 
     let w_pts = page.width().value;
@@ -658,8 +679,10 @@ fn composite_highlights(page: &PdfPage, image: &mut image::DynamicImage) {
     };
     let scale = image.width() as f32 / w_pts;
 
-    for annot in page.annotations().iter() {
-        if annot.annotation_type() != PdfPageAnnotationType::Highlight {
+    for (i, annot) in page.annotations().iter().enumerate() {
+        if annot.annotation_type() != PdfPageAnnotationType::Highlight
+            || !session.contains(&(page_index, i as u16))
+        {
             continue;
         }
         let Ok(bounds) = annot.bounds() else { continue };
@@ -755,7 +778,7 @@ fn delete_pages(
     // Descending order so earlier deletions don't shift later indices.
     indices.sort_unstable_by(|a, b| b.cmp(a));
     indices.dedup();
-    for index in indices {
+    for index in indices.iter().copied() {
         entry
             .doc
             .pages()
@@ -764,6 +787,13 @@ fn delete_pages(
             .delete()
             .map_err(|e| format!("Could not delete page {index}: {e}"))?;
     }
+    // Remap session-highlight page numbers past the removed pages.
+    entry.session_highlights = entry
+        .session_highlights
+        .iter()
+        .filter(|&&(p, _)| !indices.contains(&p))
+        .map(|&(p, i)| (p - indices.iter().filter(|&&d| d < p).count() as u16, i))
+        .collect();
     Ok(make_info(id, entry))
 }
 
@@ -796,10 +826,39 @@ fn reorder_pages(
             .map_err(|e| format!("Could not move page {src}: {e}"))?;
     }
     entry.doc = new_doc;
+    // Remap session-highlight page numbers to their new positions.
+    entry.session_highlights = entry
+        .session_highlights
+        .iter()
+        .filter_map(|&(p, i)| {
+            order.iter().position(|&src| src == p).map(|dest| (dest as u16, i))
+        })
+        .collect();
     Ok(make_info(id, entry))
 }
 
+fn run_qpdf(cmd: &mut std::process::Command) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output().map_err(|e| format!("Could not run qpdf: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Encryption step failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Save pipeline: snapshot → decrypt (if the in-memory doc carries load-time
+/// encryption) → write real appearance streams (ap.rs) → encrypt to the
+/// user's save password or write plain → reload the fixed bytes so the
+/// in-memory doc matches the file exactly.
 fn save_doc(
+    pdfium: &'static Pdfium,
     docs: &mut HashMap<u32, OpenDoc>,
     id: u32,
     path: Option<PathBuf>,
@@ -807,45 +866,64 @@ fn save_doc(
 ) -> Result<DocInfo, String> {
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
     let target = path.unwrap_or_else(|| entry.path.clone());
+    let stamp = std::process::id();
 
-    // PDFium snapshots keep the encryption the doc was LOADED with, so any
-    // difference between doc_password and save_password routes through qpdf.
-    if entry.doc_password == entry.save_password && entry.save_password.is_none() {
-        entry.doc.save_to_file(&target).map_err(|e| format!("Save failed: {e}"))?;
+    let temp1 = std::env::temp_dir().join(format!("zugapdf-save-a-{stamp}-{id}.pdf"));
+    entry.doc.save_to_file(&temp1).map_err(|e| format!("Save failed: {e}"))?;
+
+    let plain_bytes = if let Some(old) = &entry.doc_password {
+        let qpdf = qpdf.ok_or("qpdf is not installed — cannot save an encrypted PDF")?;
+        let temp2 = std::env::temp_dir().join(format!("zugapdf-save-b-{stamp}-{id}.pdf"));
+        let result = run_qpdf(
+            std::process::Command::new(qpdf)
+                .arg(format!("--password={old}"))
+                .arg("--decrypt")
+                .arg(&temp1)
+                .arg(&temp2),
+        );
+        let bytes = result.and_then(|_| {
+            std::fs::read(&temp2).map_err(|e| format!("Save failed: {e}"))
+        });
+        let _ = std::fs::remove_file(&temp2);
+        bytes
     } else {
-        let qpdf = qpdf.ok_or("qpdf is not installed — cannot change PDF encryption")?;
-        let temp =
-            std::env::temp_dir().join(format!("zugapdf-enc-{}-{id}.pdf", std::process::id()));
-        entry.doc.save_to_file(&temp).map_err(|e| format!("Save failed: {e}"))?;
+        std::fs::read(&temp1).map_err(|e| format!("Save failed: {e}"))
+    };
+    let _ = std::fs::remove_file(&temp1);
+    let plain_bytes = plain_bytes?;
 
-        let mut cmd = std::process::Command::new(qpdf);
-        if let Some(old) = &entry.doc_password {
-            cmd.arg(format!("--password={old}"));
+    let fixed = crate::ap::fix_appearance_streams(plain_bytes);
+
+    match &entry.save_password {
+        None => {
+            std::fs::write(&target, &fixed).map_err(|e| format!("Save failed: {e}"))?;
         }
-        match &entry.save_password {
-            Some(pw) => {
-                cmd.arg("--encrypt").arg(pw).arg(pw).arg("256").arg("--");
-            }
-            None => {
-                cmd.arg("--decrypt");
-            }
-        }
-        cmd.arg(&temp).arg(&target);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let output = cmd.output().map_err(|e| format!("Could not run qpdf: {e}"))?;
-        let _ = std::fs::remove_file(&temp);
-        if !output.status.success() {
-            return Err(format!(
-                "Could not update encryption: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        Some(pw) => {
+            let qpdf = qpdf.ok_or("qpdf is not installed — cannot save with a password")?;
+            let temp3 = std::env::temp_dir().join(format!("zugapdf-save-c-{stamp}-{id}.pdf"));
+            std::fs::write(&temp3, &fixed).map_err(|e| format!("Save failed: {e}"))?;
+            let result = run_qpdf(
+                std::process::Command::new(qpdf)
+                    .arg("--encrypt")
+                    .arg(pw)
+                    .arg(pw)
+                    .arg("256")
+                    .arg("--")
+                    .arg(&temp3)
+                    .arg(&target),
+            );
+            let _ = std::fs::remove_file(&temp3);
+            result?;
         }
     }
 
+    // Reload so the in-memory doc has the appearance streams too — session
+    // highlights now render natively instead of via compositing.
+    entry.doc = pdfium
+        .load_pdf_from_byte_vec(fixed, None)
+        .map_err(|e| format!("Saved file failed to reload: {e}"))?;
+    entry.doc_password = None;
+    entry.session_highlights.clear();
     entry.path = target;
     Ok(make_info(id, entry))
 }
@@ -882,7 +960,7 @@ fn export_pages(
         let mut image = bitmap
             .as_image()
             .map_err(|e| format!("Page {} render failed: {e}", i + 1))?;
-        composite_highlights(&page, &mut image);
+        composite_highlights(&page, i as u16, &entry.session_highlights, &mut image);
         let out = dir.join(format!("{stem}-page-{:03}.{ext}", i + 1));
         if jpeg {
             image::DynamicImage::ImageRgb8(image.to_rgb8())
@@ -1508,6 +1586,8 @@ fn add_highlight(
         annot
             .set_fill_color(pdf_color(color))
             .map_err(|e| format!("Could not color highlight: {e}"))?;
+        let new_index = (page.annotations().len() - 1) as u16;
+        entry.session_highlights.insert((page_index, new_index));
     }
     annot_infos(&entry.doc, page_index)
 }
@@ -1636,6 +1716,13 @@ fn delete_annotation(
             .delete_annotation(annot)
             .map_err(|e| format!("Could not delete annotation: {e}"))?;
     }
+    // Shift session-highlight indices on this page down past the removal.
+    entry.session_highlights = entry
+        .session_highlights
+        .iter()
+        .filter(|&&(p, i)| !(p == page_index && i == index))
+        .map(|&(p, i)| if p == page_index && i > index { (p, i - 1) } else { (p, i) })
+        .collect();
     annot_infos(&entry.doc, page_index)
 }
 
@@ -1711,7 +1798,7 @@ mod tests {
 
         // Save in place (byte-vec loading means no file-handle conflict),
         // re-open, and confirm the changes persisted.
-        let info = save_doc(&mut docs, info.id, None, None).unwrap();
+        let info = save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         assert_eq!(reopened.page_count, 2);
         let heights: Vec<i32> = reopened.pages.iter().map(|p| p.height as i32).collect();
@@ -1758,7 +1845,7 @@ mod tests {
         assert!(annots[2].right > annots[2].left && annots[2].top > annots[2].bottom);
 
         // Persist and reopen: all three annotations must still be there.
-        save_doc(&mut docs, info.id, None, None).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         let annots = list_annotations(&docs, reopened.id, 0).unwrap();
         assert_eq!(annots.len(), 3);
@@ -1885,7 +1972,7 @@ mod tests {
         let remaining = delete_page_object(&mut docs, info.id, 0, header.index).unwrap();
         assert_eq!(remaining.len(), objects.len() - 1);
 
-        save_doc(&mut docs, info.id, None, None).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         assert!(!search_document(&docs, reopened.id, "REWRITTEN", true).unwrap().is_empty());
 
@@ -1920,7 +2007,7 @@ mod tests {
         assert!(!hits.is_empty(), "footer with substituted page numbers");
 
         // Persists through save → reopen.
-        save_doc(&mut docs, info.id, None, None).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         let hits = search_document(&docs, reopened.id, "CONFIDENTIAL", true).unwrap();
         assert!(!hits.is_empty());
@@ -1953,7 +2040,7 @@ mod tests {
 
         // Set password and save.
         docs.get_mut(&info.id).unwrap().save_password = Some("hunter2".into());
-        let saved = save_doc(&mut docs, info.id, None, Some(&qpdf)).unwrap();
+        let saved = save_doc(pdfium, &mut docs, info.id, None, Some(&qpdf)).unwrap();
         assert!(saved.has_password);
 
         // No password / wrong password → PASSWORD_REQUIRED; correct opens.
@@ -1970,7 +2057,7 @@ mod tests {
 
         // Remove password, save, reopen without one.
         docs.get_mut(&reopened.id).unwrap().save_password = None;
-        save_doc(&mut docs, reopened.id, None, Some(&qpdf)).unwrap();
+        save_doc(pdfium, &mut docs, reopened.id, None, Some(&qpdf)).unwrap();
         let plain = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         assert!(!plain.has_password);
 
@@ -2013,7 +2100,7 @@ mod tests {
         );
 
         // Persist and reopen.
-        save_doc(&mut docs, info.id, None, None).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         let fields = list_form_fields(&docs, reopened.id, 0).unwrap();
         assert_eq!(fields.iter().find(|f| f.name == "full_name").unwrap().value, "Buga Delgado");
@@ -2081,7 +2168,7 @@ mod tests {
         assert!(outcome.bytes_before > 0 && outcome.bytes_after > 0);
 
         // The compressed doc replaced the in-memory one; it must still save.
-        save_doc(&mut docs, info.id, None, None).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         assert_eq!(reopened.page_count, 4);
 
@@ -2117,12 +2204,78 @@ mod tests {
         let heights: Vec<i32> = info.pages.iter().map(|p| p.height as i32).collect();
         assert_eq!(heights, vec![700, 700, 500, 500, 500]);
 
-        save_doc(&mut docs, info.id, None, None).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, base.clone(), None).unwrap();
         assert_eq!(reopened.page_count, 5);
 
         let _ = std::fs::remove_file(base);
         let _ = std::fs::remove_file(extra);
+    }
+
+    /// The save pipeline writes REAL appearance streams: a saved highlight
+    /// renders natively (no compositing) — i.e., it's visible in Chrome/Edge.
+    #[test]
+    fn saved_highlight_has_appearance_stream() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+
+        let tmp = std::env::temp_dir().join("zugapdf-test-ap.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            doc.save_to_file(&tmp).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let yellow = Rgba { r: 255, g: 220, b: 60, a: 128 };
+        add_highlight(&mut docs, info.id, 0, 100.0, 700.0, 300.0, 720.0, yellow).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
+
+        // 1) Structurally: the saved file's highlight carries /AP.
+        let saved = std::fs::read(&tmp).unwrap();
+        let parsed = lopdf::Document::load_mem(&saved).unwrap();
+        let mut found_ap = false;
+        for (_, page_id) in parsed.get_pages() {
+            if let Ok(page) = parsed.get_dictionary(page_id) {
+                if let Ok(annots) = page.get(b"Annots").and_then(|a| a.as_array()) {
+                    for a in annots {
+                        // Annot may be inline or a reference.
+                        let dict = match a {
+                            lopdf::Object::Dictionary(d) => Some(d),
+                            lopdf::Object::Reference(r) => {
+                                parsed.get_object(*r).and_then(|o| o.as_dict()).ok()
+                            }
+                            _ => None,
+                        };
+                        if let Some(dict) = dict {
+                            if dict.get(b"Subtype").and_then(|s| s.as_name()).ok()
+                                == Some(b"Highlight".as_ref())
+                            {
+                                found_ap = dict.has(b"AP");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found_ap, "saved highlight must carry an /AP appearance stream");
+
+        // 2) Visually: session set cleared by save, so this render uses the
+        // AP stream alone — the pixel must still be yellowish.
+        assert!(docs.get(&info.id).unwrap().session_highlights.is_empty());
+        let rendered = render_page(&docs, info.id, 0, 595, false).unwrap();
+        let b64 = rendered.data_url.split(',').nth(1).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        let px = img.get_pixel(200, 132);
+        assert!(
+            px[0] > 230 && px[1] > 200 && px[2] < 200,
+            "AP-stream highlight did not render: pixel = {px:?}"
+        );
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// A placed highlight must actually RENDER — PDFium doesn't synthesize
