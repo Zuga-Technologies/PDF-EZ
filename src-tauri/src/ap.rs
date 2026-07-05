@@ -76,7 +76,14 @@ fn try_fix(bytes: &[u8]) -> lopdf::Result<Option<Vec<u8>>> {
                 .and_then(|o| o.as_name())
                 .map(|n| n == b"Highlight")
                 .unwrap_or(false);
-            if !is_highlight || annot.has(b"AP") {
+            // Replace missing APs AND pdfium's auto-generated ones — the
+            // latter render wrong (misplaced on rotated pages, invisible in
+            // some viewers). Hand-authored APs (e.g. Acrobat's) are kept.
+            let pdfium_generated = matches!(
+                annot.get(b"PDFIUM_HasGeneratedAP").and_then(|o| o.as_bool()),
+                Ok(true)
+            );
+            if !is_highlight || (annot.has(b"AP") && !pdfium_generated) {
                 continue;
             }
             let Some(rect) = read_rect(annot.get(b"Rect").ok()) else { continue };
@@ -96,6 +103,7 @@ fn try_fix(bytes: &[u8]) -> lopdf::Result<Option<Vec<u8>>> {
             Slot::ByRef(annot_id) => {
                 if let Ok(annot) = doc.get_dictionary_mut(annot_id) {
                     annot.set(b"AP".to_vec(), ap_value);
+                    annot.remove(b"PDFIUM_HasGeneratedAP");
                     changed = true;
                 }
             }
@@ -113,6 +121,7 @@ fn try_fix(bytes: &[u8]) -> lopdf::Result<Option<Vec<u8>>> {
                 if let Some(array) = array {
                     if let Some(Object::Dictionary(d)) = array.get_mut(pos) {
                         d.set(b"AP".to_vec(), ap_value);
+                        d.remove(b"PDFIUM_HasGeneratedAP");
                         changed = true;
                     }
                 }

@@ -80,7 +80,7 @@ pub struct SearchHit {
     pub top: f32,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct AnnotInfo {
     pub page: u16,
     pub index: u16,
@@ -729,6 +729,61 @@ fn page_text(docs: &HashMap<u32, OpenDoc>, id: u32, index: u16) -> Result<String
     Ok(text.all())
 }
 
+/// Display space (what the UI sees: the rendered, rotated page with a
+/// bottom-left origin) vs page space (unrotated coordinates annotations and
+/// objects are stored in). All coordinate-carrying APIs speak DISPLAY space;
+/// these helpers convert at the engine boundary.
+#[derive(Clone, Copy)]
+struct SpaceCtx {
+    turns: i8,
+    /// Unrotated page dims in points.
+    uw: f32,
+    uh: f32,
+}
+
+fn space_ctx(page: &PdfPage) -> SpaceCtx {
+    let turns = rotation_to_turns(page.rotation().unwrap_or(PdfPageRenderRotation::None));
+    // width()/height() reflect /Rotate — swap back for unrotated dims.
+    let (uw, uh) = if turns % 2 == 1 {
+        (page.height().value, page.width().value)
+    } else {
+        (page.width().value, page.height().value)
+    };
+    SpaceCtx { turns, uw, uh }
+}
+
+fn point_to_display(c: SpaceCtx, x: f32, y: f32) -> (f32, f32) {
+    match c.turns.rem_euclid(4) {
+        1 => (y, c.uw - x),
+        2 => (c.uw - x, c.uh - y),
+        3 => (c.uh - y, x),
+        _ => (x, y),
+    }
+}
+
+fn point_to_page(c: SpaceCtx, dx: f32, dy: f32) -> (f32, f32) {
+    match c.turns.rem_euclid(4) {
+        1 => (c.uw - dy, dx),
+        2 => (c.uw - dx, c.uh - dy),
+        3 => (dy, c.uh - dx),
+        _ => (dx, dy),
+    }
+}
+
+/// (left, bottom, right, top) page space → display space.
+fn rect_to_display(c: SpaceCtx, l: f32, b: f32, r: f32, t: f32) -> (f32, f32, f32, f32) {
+    let (x1, y1) = point_to_display(c, l, b);
+    let (x2, y2) = point_to_display(c, r, t);
+    (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
+}
+
+/// (left, bottom, right, top) display space → page space.
+fn rect_to_page(c: SpaceCtx, l: f32, b: f32, r: f32, t: f32) -> (f32, f32, f32, f32) {
+    let (x1, y1) = point_to_page(c, l, b);
+    let (x2, y2) = point_to_page(c, r, t);
+    (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
+}
+
 fn rotation_to_turns(r: PdfPageRenderRotation) -> i8 {
     match r {
         PdfPageRenderRotation::None => 0,
@@ -1028,6 +1083,7 @@ fn obj_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<ObjInfo>
         .pages()
         .get(page_index.into())
         .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+    let ctx = space_ctx(&page);
     let mut out = Vec::new();
     for (i, object) in page.objects().iter().enumerate() {
         let (kind, text, font_size) = if let Some(text_obj) = object.as_text_object() {
@@ -1038,16 +1094,23 @@ fn obj_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<ObjInfo>
             continue;
         };
         let Ok(bounds) = object.bounds() else { continue };
+        let (left, bottom, right, top) = rect_to_display(
+            ctx,
+            bounds.left().value,
+            bounds.bottom().value,
+            bounds.right().value,
+            bounds.top().value,
+        );
         out.push(ObjInfo {
             page: page_index,
             index: i as u16,
             kind: kind.to_string(),
             text,
             font_size,
-            left: bounds.left().value,
-            bottom: bounds.bottom().value,
-            right: bounds.right().value,
-            top: bounds.top().value,
+            left,
+            bottom,
+            right,
+            top,
         });
     }
     Ok(out)
@@ -1279,6 +1342,7 @@ fn field_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<FieldI
         .pages()
         .get(page_index.into())
         .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+    let ctx = space_ctx(&page);
     let mut out = Vec::new();
     for (i, annot) in page.annotations().iter().enumerate() {
         let Some(field) = annot.as_form_field() else { continue };
@@ -1310,6 +1374,13 @@ fn field_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<FieldI
                 false,
             ),
         };
+        let (left, bottom, right, top) = rect_to_display(
+            ctx,
+            bounds.left().value,
+            bounds.bottom().value,
+            bounds.right().value,
+            bounds.top().value,
+        );
         out.push(FieldInfo {
             page: page_index,
             index: i as u16,
@@ -1317,10 +1388,10 @@ fn field_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<FieldI
             name: field.name().unwrap_or_default(),
             value,
             checked,
-            left: bounds.left().value,
-            bottom: bounds.bottom().value,
-            right: bounds.right().value,
-            top: bounds.top().value,
+            left,
+            bottom,
+            right,
+            top,
         });
     }
     Ok(out)
@@ -1403,19 +1474,20 @@ fn search_document(
     let mut hit_no: u32 = 0;
 
     'pages: for (page_index, page) in doc.pages().iter().enumerate() {
+        let ctx = space_ctx(&page);
         let Ok(text) = page.text() else { continue };
         let Ok(search) = text.search(query, &options) else { continue };
         for segments in search.iter(PdfSearchDirection::SearchForward) {
             for segment in segments.iter() {
                 let bounds = segment.bounds();
-                hits.push(SearchHit {
-                    hit: hit_no,
-                    page: page_index as u16,
-                    left: bounds.left().value,
-                    bottom: bounds.bottom().value,
-                    right: bounds.right().value,
-                    top: bounds.top().value,
-                });
+                let (left, bottom, right, top) = rect_to_display(
+                    ctx,
+                    bounds.left().value,
+                    bounds.bottom().value,
+                    bounds.right().value,
+                    bounds.top().value,
+                );
+                hits.push(SearchHit { hit: hit_no, page: page_index as u16, left, bottom, right, top });
             }
             hit_no += 1;
             if hit_no >= MAX_SEARCH_HITS {
@@ -1521,17 +1593,25 @@ fn annot_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<AnnotI
         .pages()
         .get(page_index.into())
         .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+    let ctx = space_ctx(&page);
     let mut out = Vec::new();
     for (i, annot) in page.annotations().iter().enumerate() {
         let bounds = annot.bounds().unwrap_or(PdfRect::ZERO);
+        let (left, bottom, right, top) = rect_to_display(
+            ctx,
+            bounds.left().value,
+            bounds.bottom().value,
+            bounds.right().value,
+            bounds.top().value,
+        );
         out.push(AnnotInfo {
             page: page_index,
             index: i as u16,
             kind: format!("{:?}", annot.annotation_type()),
-            left: bounds.left().value,
-            bottom: bounds.bottom().value,
-            right: bounds.right().value,
-            top: bounds.top().value,
+            left,
+            bottom,
+            right,
+            top,
             contents: annot.contents(),
         });
     }
@@ -1568,6 +1648,9 @@ fn add_highlight(
             .pages()
             .get(page_index.into())
             .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        // UI coords are display space; annotations store page space.
+        let (left, bottom, right, top) =
+            rect_to_page(space_ctx(&page), left, bottom, right, top);
         let rect = PdfRect::new(
             PdfPoints::new(bottom),
             PdfPoints::new(left),
@@ -1608,6 +1691,7 @@ fn add_note(
             .pages()
             .get(page_index.into())
             .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let (x, y) = point_to_page(space_ctx(&page), x, y);
         let mut annot = page
             .annotations_mut()
             .create_text_annotation(contents)
@@ -1633,7 +1717,20 @@ fn add_ink(
     width: f32,
 ) -> Result<Vec<AnnotInfo>, String> {
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
-    let strokes: Vec<&Vec<(f32, f32)>> = strokes.iter().filter(|s| s.len() >= 2).collect();
+    let ctx = {
+        let page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        space_ctx(&page)
+    };
+    // UI stroke points are display space; store page space.
+    let strokes: Vec<Vec<(f32, f32)>> = strokes
+        .iter()
+        .filter(|s| s.len() >= 2)
+        .map(|s| s.iter().map(|&(x, y)| point_to_page(ctx, x, y)).collect())
+        .collect();
     if strokes.is_empty() {
         return Err("Ink stroke needs at least two points".to_string());
     }
@@ -1649,7 +1746,7 @@ fn add_ink(
     let pad = width.max(1.0);
 
     let mut paths = Vec::new();
-    for stroke in &strokes {
+    for stroke in strokes.iter() {
         let (x0, y0) = stroke[0];
         let mut path = PdfPagePathObject::new(
             &entry.doc,
@@ -2210,6 +2307,91 @@ mod tests {
 
         let _ = std::fs::remove_file(base);
         let _ = std::fs::remove_file(extra);
+    }
+
+    /// Manual verification helper: builds a highlighted+saved sample at a
+    /// fixed path for opening in external viewers. Run explicitly:
+    /// cargo test make_ap_sample -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn make_ap_sample() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        let out = std::env::temp_dir().join("zugapdf-ap-sample.pdf");
+        std::fs::copy(&fixture, &out).unwrap();
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, out.clone(), None).unwrap();
+        let yellow = Rgba { r: 255, g: 220, b: 60, a: 128 };
+        // CENTER-page highlight — a mapping bug that collapses appearance
+        // streams toward the origin shows immediately with this placement.
+        add_highlight(&mut docs, info.id, 0, 200.0, 380.0, 420.0, 420.0, yellow).unwrap();
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
+
+        // Fresh-engine render: where does the highlight actually land?
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, out.clone(), None).unwrap();
+        let rendered = render_page(&docs, reopened.id, 0, 612, false).unwrap();
+        let b64 = rendered.data_url.split(',').nth(1).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        // Page 612x792 at 612px → 1px/pt. Center of highlight: (310, 792-400=392).
+        let at_center = img.get_pixel(310, 392);
+        let at_origin_area = img.get_pixel(110, 30);
+        eprintln!("PROBE center px = {at_center:?}, top-left-area px = {at_origin_area:?}");
+        eprintln!("sample at {}", out.display());
+
+    }
+
+    /// Highlights placed on ROTATED pages land where the user pointed, both
+    /// in-session (composite) and after save (AP stream). Regression for the
+    /// display-space vs page-space mismatch Buga caught in Edge.
+    #[test]
+    fn rotated_page_highlight_placement() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !fixture.exists() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("zugapdf-test-rot-hl.pdf");
+        std::fs::copy(&fixture, &tmp).unwrap();
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        rotate_pages(&mut docs, info.id, &[0], 1).unwrap();
+
+        // Rotated display: 792 wide x 612 tall. Place over a WHITE region
+        // (display left-middle) so multiply-yellow is unambiguous in pixels.
+        let yellow = Rgba { r: 255, g: 220, b: 60, a: 128 };
+        let annots =
+            add_highlight(&mut docs, info.id, 0, 100.0, 280.0, 300.0, 320.0, yellow).unwrap();
+        // Reported bounds are display space: must match what was requested.
+        let hl = annots.last().unwrap();
+        assert!((hl.left - 100.0).abs() < 1.0 && (hl.top - 320.0).abs() < 1.0, "{hl:?}");
+
+        let check_center = |docs: &HashMap<u32, OpenDoc>, id: u32, label: &str| {
+            let rendered = render_page(docs, id, 0, 792, false).unwrap();
+            let b64 = rendered.data_url.split(',').nth(1).unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+            let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
+            // Display 792x612 at 792px → 1px/pt; inside rect: (200, 612-300).
+            let px = img.get_pixel(200, 312);
+            // Multiply-yellow over white: red stays high, blue drops hard.
+            assert!(px[2] < 200 && px[0] > 150, "{label}: pixel = {px:?}");
+        };
+        check_center(&docs, info.id, "in-session composite");
+
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
+        check_center(&docs, info.id, "post-save AP stream");
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        check_center(&docs, reopened.id, "reopened file");
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// The save pipeline writes REAL appearance streams: a saved highlight
