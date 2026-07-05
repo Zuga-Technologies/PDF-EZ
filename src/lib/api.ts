@@ -20,6 +20,15 @@ export interface RenderedPage {
   data_url: string;
 }
 
+export interface SearchHit {
+  hit: number;
+  page: number;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+
 export interface AnnotInfo {
   page: number;
   index: number;
@@ -63,6 +72,8 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  searchDocument: (id: number, query: string, matchCase: boolean) =>
+    invoke<SearchHit[]>("search_document", { id, query, matchCase }),
   compressDocument: (id: number) =>
     invoke<{ info: DocInfo; bytes_before: number; bytes_after: number }>("compress_document", {
       id,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo } from "../lib/api";
+import { api, type DocInfo, type SearchHit } from "../lib/api";
 
 interface RenderSlot {
   url: string | null;
@@ -47,6 +47,15 @@ interface DragState {
 const drag = ref<DragState | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
+
+// ---- text search ----
+const searchQuery = ref("");
+const searchHits = ref<SearchHit[]>([]);
+const searchCurrent = ref(0); // current hit number
+const searchTotal = computed(() =>
+  searchHits.value.length ? Math.max(...searchHits.value.map((h) => h.hit)) + 1 : 0,
+);
+const searchInput = ref<HTMLInputElement | null>(null);
 
 /// Committed marks kept on screen until the engine re-render lands, so the
 /// page never shows a gap between preview and painted annotation.
@@ -237,6 +246,8 @@ async function loadDocument(path: string, pw?: string) {
     }
     const info = await api.openDocument(path, pw);
     dirty.value = false;
+    searchQuery.value = "";
+    searchHits.value = [];
     applyInfo(info);
   } catch (e) {
     if (String(e).includes("PASSWORD_REQUIRED")) {
@@ -497,6 +508,52 @@ async function refreshPage(index: number) {
 
 // ---- save ----
 
+async function runSearch() {
+  if (!doc.value) return;
+  const q = searchQuery.value.trim();
+  if (!q) {
+    searchHits.value = [];
+    return;
+  }
+  try {
+    searchHits.value = await api.searchDocument(doc.value.id, q, false);
+    searchCurrent.value = 0;
+    if (searchHits.value.length) scrollToHit(0);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+function stepSearch(delta: number) {
+  if (!searchTotal.value) return;
+  searchCurrent.value = (searchCurrent.value + delta + searchTotal.value) % searchTotal.value;
+  scrollToHit(searchCurrent.value);
+}
+
+function scrollToHit(hit: number) {
+  const first = searchHits.value.find((h) => h.hit === hit);
+  if (!first || !doc.value || !scroller.value) return;
+  const pageEl = scroller.value.querySelector<HTMLElement>(`[data-page="${first.page}"]`);
+  if (!pageEl) return;
+  const pageH = doc.value.pages[first.page].height;
+  const ratio = (pageH - first.top) / pageH;
+  scroller.value.scrollTo({
+    top: pageEl.offsetTop + pageEl.offsetHeight * ratio - scroller.value.clientHeight / 3,
+    behavior: "smooth",
+  });
+}
+
+function hitCss(h: SearchHit) {
+  const scale = POINTS_TO_CSS * zoom.value;
+  const pageH = doc.value!.pages[h.page].height;
+  return {
+    left: h.left * scale + "px",
+    top: (pageH - h.top) * scale + "px",
+    width: Math.max((h.right - h.left) * scale, 2) + "px",
+    height: Math.max((h.top - h.bottom) * scale, 2) + "px",
+  };
+}
+
 function fmtBytes(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)} KB`;
@@ -583,6 +640,12 @@ function zoomOut() {
 
 function onKeydown(e: KeyboardEvent) {
   if (noteDraft.value) return; // typing in the note box
+  if (e.ctrlKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    searchInput.value?.focus();
+    return;
+  }
+  if (document.activeElement === searchInput.value) return; // typing a query
   if (e.ctrlKey && e.key.toLowerCase() === "s") {
     e.preventDefault();
     e.shiftKey ? void saveAs() : void saveNow();
@@ -653,6 +716,22 @@ onBeforeUnmount(() => {
       </template>
       <div class="spacer"></div>
       <template v-if="doc">
+        <input
+          ref="searchInput"
+          v-model="searchQuery"
+          class="search"
+          type="search"
+          placeholder="Find… (Ctrl+F)"
+          @keydown.enter.prevent="searchHits.length && searchQuery.trim() ? stepSearch(1) : runSearch()"
+          @keydown.escape="((searchQuery = ''), (searchHits = []))"
+          @input="searchHits = []"
+        />
+        <template v-if="searchTotal">
+          <span class="meta">{{ searchCurrent + 1 }}/{{ searchTotal }}</span>
+          <button aria-label="Previous match" @click="stepSearch(-1)">‹</button>
+          <button aria-label="Next match" @click="stepSearch(1)">›</button>
+        </template>
+        <span class="divider"></span>
         <span class="doctitle" :title="doc.path">{{ title }}<i v-if="dirty"> •</i></span>
         <span class="meta">{{ doc.page_count }} {{ doc.page_count === 1 ? "page" : "pages" }}</span>
         <button aria-label="Zoom out" @click="zoomOut">−</button>
@@ -733,6 +812,15 @@ onBeforeUnmount(() => {
             <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
               <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
             </svg>
+
+            <template v-for="(h, hi) in searchHits" :key="'s' + hi">
+              <div
+                v-if="h.page === index"
+                class="search-hit"
+                :class="{ current: h.hit === searchCurrent }"
+                :style="hitCss(h)"
+              ></div>
+            </template>
 
             <div
               v-if="selectedAnnot && selectedAnnot.page === index"
@@ -934,6 +1022,28 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   padding: 0.35rem 0.5rem;
   resize: vertical;
+}
+.search {
+  font: inherit;
+  font-size: 0.85rem;
+  width: 11rem;
+  background: var(--chrome-raised);
+  color: var(--text);
+  border: 1px solid var(--chrome-line);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+}
+.search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.search-hit {
+  position: absolute;
+  background: rgba(255, 150, 40, 0.35);
+  outline: 1px solid rgba(255, 150, 40, 0.7);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.search-hit.current {
+  background: rgba(255, 110, 40, 0.55);
+  outline: 2px solid #ff7a28;
 }
 .annot-selection {
   position: absolute;

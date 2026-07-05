@@ -38,6 +38,17 @@ pub struct CompressOutcome {
 }
 
 #[derive(Serialize, Clone)]
+pub struct SearchHit {
+    /// Matches sharing a hit number are one result spanning multiple lines.
+    pub hit: u32,
+    pub page: u16,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+#[derive(Serialize, Clone)]
 pub struct AnnotInfo {
     pub page: u16,
     pub index: u16,
@@ -113,6 +124,12 @@ pub enum PdfRequest {
         id: u32,
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
+    },
+    SearchDocument {
+        id: u32,
+        query: String,
+        match_case: bool,
+        reply: Sender<Result<Vec<SearchHit>, String>>,
     },
     /// Structural compression via the bundled qpdf CLI (object streams,
     /// stream recompression). Result replaces the in-memory document;
@@ -287,6 +304,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path);
                         let _ = reply.send(result);
                     }
+                    PdfRequest::SearchDocument { id, query, match_case, reply } => {
+                        let _ = reply.send(search_document(&docs, id, &query, match_case));
+                    }
                     PdfRequest::Compress { id, reply } => {
                         let _ = reply.send(compress(pdfium, &mut docs, id, qpdf.as_deref()));
                     }
@@ -327,6 +347,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::SearchDocument { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Compress { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::MergeAppend { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListAnnotations { reply, .. } => drop(reply.send(Err(e))),
@@ -622,6 +643,48 @@ fn save_doc(
         .map_err(|e| format!("Save failed: {e}"))?;
     entry.path = target;
     Ok(make_info(id, entry))
+}
+
+const MAX_SEARCH_HITS: u32 = 500;
+
+fn search_document(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    query: &str,
+    match_case: bool,
+) -> Result<Vec<SearchHit>, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let options = PdfSearchOptions::new().match_case(match_case);
+    let mut hits = Vec::new();
+    let mut hit_no: u32 = 0;
+
+    'pages: for (page_index, page) in doc.pages().iter().enumerate() {
+        let Ok(text) = page.text() else { continue };
+        let Ok(search) = text.search(query, &options) else { continue };
+        for segments in search.iter(PdfSearchDirection::SearchForward) {
+            for segment in segments.iter() {
+                let bounds = segment.bounds();
+                hits.push(SearchHit {
+                    hit: hit_no,
+                    page: page_index as u16,
+                    left: bounds.left().value,
+                    bottom: bounds.bottom().value,
+                    right: bounds.right().value,
+                    top: bounds.top().value,
+                });
+            }
+            hit_no += 1;
+            if hit_no >= MAX_SEARCH_HITS {
+                break 'pages;
+            }
+        }
+    }
+    Ok(hits)
 }
 
 fn compress(
@@ -1064,6 +1127,37 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Search finds per-page hits with sane bounds in the Alpha fixture.
+    #[test]
+    fn search_finds_hits() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !path.exists() {
+            eprintln!("Alpha.pdf not generated — skipping");
+            return;
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, path, None).unwrap();
+
+        // "Alpha" appears twice per page: the header ("Alpha.pdf - page N")
+        // and the big center label ("AlphaN").
+        let hits = search_document(&docs, info.id, "Alpha", true).unwrap();
+        let hit_count = hits.iter().map(|h| h.hit).max().map(|m| m + 1).unwrap_or(0);
+        assert_eq!(hit_count, 6, "expected two hits per page");
+        let pages: Vec<u16> = hits.iter().map(|h| h.page).collect();
+        assert!(pages.contains(&0) && pages.contains(&1) && pages.contains(&2));
+        for h in &hits {
+            assert!(h.right > h.left && h.top > h.bottom, "degenerate hit bounds");
+        }
+
+        // Case-sensitive miss.
+        let none = search_document(&docs, info.id, "ALPHA.PDF", true).unwrap();
+        assert!(none.is_empty());
     }
 
     /// Compression round-trips through qpdf and the result opens with the
