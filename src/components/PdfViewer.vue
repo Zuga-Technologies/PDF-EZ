@@ -24,6 +24,15 @@ const pendingPath = ref<string | null>(null);
 const dragFrom = ref<number | null>(null);
 const dragOver = ref<number | null>(null);
 
+/// `autofocus` is unreliable on dynamically inserted elements in Chromium —
+/// focus explicitly when the element mounts (and select text for overwrite).
+const vFocus = {
+  mounted(el: HTMLInputElement | HTMLTextAreaElement) {
+    el.focus();
+    if (el instanceof HTMLInputElement) el.select();
+  },
+};
+
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
 const POINTS_TO_CSS = 96 / 72;
 const THUMB_CSS_WIDTH = 132;
@@ -958,7 +967,7 @@ onBeforeUnmount(() => {
               class="field-editor"
               v-model="fieldEditor.value"
               :style="fieldEditor.css"
-              autofocus
+              v-focus
               @pointerdown.stop
               @keydown.enter.prevent="moveEditor(1)"
               @keydown.tab.exact.prevent="moveEditor(1)"
@@ -1021,7 +1030,7 @@ onBeforeUnmount(() => {
                 v-model="noteDraft.text"
                 rows="3"
                 placeholder="Note text…"
-                autofocus
+                v-focus
                 @keydown.enter.exact.prevent="submitNote"
                 @keydown.escape="noteDraft = null"
               ></textarea>
