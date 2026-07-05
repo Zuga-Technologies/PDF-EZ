@@ -56,6 +56,36 @@ async fn get_page_text(app: tauri::AppHandle, id: u32, index: u16) -> Result<Str
 }
 
 #[tauri::command]
+async fn rotate_pages(
+    app: tauri::AppHandle,
+    id: u32,
+    indices: Vec<u16>,
+    quarter_turns: i8,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::RotatePages { id, indices, quarter_turns, reply })
+        .await
+}
+
+#[tauri::command]
+async fn delete_pages(app: tauri::AppHandle, id: u32, indices: Vec<u16>) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::DeletePages { id, indices, reply }).await
+}
+
+#[tauri::command]
+async fn reorder_pages(app: tauri::AppHandle, id: u32, order: Vec<u16>) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::ReorderPages { id, order, reply }).await
+}
+
+#[tauri::command]
+async fn save_document(
+    app: tauri::AppHandle,
+    id: u32,
+    path: Option<String>,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::Save { id, path: path.map(PathBuf::from), reply }).await
+}
+
+#[tauri::command]
 fn check_license(app: tauri::AppHandle) -> Result<license::LicenseStatus, String> {
     Ok(license::check(&app_data_dir(&app)?))
 }
@@ -83,6 +113,10 @@ pub fn run() {
             close_document,
             render_page,
             get_page_text,
+            rotate_pages,
+            delete_pages,
+            reorder_pages,
+            save_document,
             check_license,
             activate_license_file
         ])

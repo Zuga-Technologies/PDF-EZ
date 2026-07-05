@@ -10,6 +10,7 @@ export interface DocInfo {
   page_count: number;
   pages: PageDims[];
   title: string | null;
+  path: string;
 }
 
 export interface RenderedPage {
@@ -34,6 +35,14 @@ export const api = {
     invoke<RenderedPage>("render_page", { id, index, targetWidth }),
   getPageText: (id: number, index: number) =>
     invoke<string>("get_page_text", { id, index }),
+  rotatePages: (id: number, indices: number[], quarterTurns: number) =>
+    invoke<DocInfo>("rotate_pages", { id, indices, quarterTurns }),
+  deletePages: (id: number, indices: number[]) =>
+    invoke<DocInfo>("delete_pages", { id, indices }),
+  reorderPages: (id: number, order: number[]) =>
+    invoke<DocInfo>("reorder_pages", { id, order }),
+  saveDocument: (id: number, path?: string) =>
+    invoke<DocInfo>("save_document", { id, path: path ?? null }),
   checkLicense: () => invoke<LicenseStatus>("check_license"),
   activateLicenseFile: (leasePath: string) =>
     invoke<LicenseStatus>("activate_license_file", { leasePath }),

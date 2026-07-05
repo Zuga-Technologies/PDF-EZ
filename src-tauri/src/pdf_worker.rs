@@ -1,6 +1,9 @@
 //! Dedicated PDF engine thread. PDFium is not thread-safe, so a single worker
 //! owns the `Pdfium` instance and every open document; commands talk to it
 //! over an mpsc channel and block on a per-request reply channel.
+//!
+//! Documents are loaded from an in-memory byte buffer, never a held file
+//! handle — the user's file is never locked, and save-in-place is safe.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -24,6 +27,7 @@ pub struct DocInfo {
     pub page_count: u16,
     pub pages: Vec<PageDims>,
     pub title: Option<String>,
+    pub path: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -56,6 +60,35 @@ pub enum PdfRequest {
         index: u16,
         reply: Sender<Result<String, String>>,
     },
+    /// Rotate by quarter turns: +1 = 90° clockwise, -1 = 90° counter-clockwise.
+    RotatePages {
+        id: u32,
+        indices: Vec<u16>,
+        quarter_turns: i8,
+        reply: Sender<Result<DocInfo, String>>,
+    },
+    DeletePages {
+        id: u32,
+        indices: Vec<u16>,
+        reply: Sender<Result<DocInfo, String>>,
+    },
+    /// `order[dest] = source index` — a full permutation of current pages.
+    ReorderPages {
+        id: u32,
+        order: Vec<u16>,
+        reply: Sender<Result<DocInfo, String>>,
+    },
+    /// `path: None` saves in place over the document's own path.
+    Save {
+        id: u32,
+        path: Option<PathBuf>,
+        reply: Sender<Result<DocInfo, String>>,
+    },
+}
+
+struct OpenDoc {
+    doc: PdfDocument<'static>,
+    path: PathBuf,
 }
 
 pub struct PdfWorkerHandle {
@@ -119,7 +152,7 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                 }
             };
 
-            let mut docs: HashMap<u32, PdfDocument<'static>> = HashMap::new();
+            let mut docs: HashMap<u32, OpenDoc> = HashMap::new();
             let mut next_id: u32 = 1;
 
             while let Ok(req) = rx.recv() {
@@ -140,6 +173,22 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = page_text(&docs, id, index);
                         let _ = reply.send(result);
                     }
+                    PdfRequest::RotatePages { id, indices, quarter_turns, reply } => {
+                        let result = rotate_pages(&mut docs, id, &indices, quarter_turns);
+                        let _ = reply.send(result);
+                    }
+                    PdfRequest::DeletePages { id, indices, reply } => {
+                        let result = delete_pages(&mut docs, id, indices);
+                        let _ = reply.send(result);
+                    }
+                    PdfRequest::ReorderPages { id, order, reply } => {
+                        let result = reorder_pages(pdfium, &mut docs, id, &order);
+                        let _ = reply.send(result);
+                    }
+                    PdfRequest::Save { id, path, reply } => {
+                        let result = save_doc(&mut docs, id, path);
+                        let _ = reply.send(result);
+                    }
                 }
             }
         })
@@ -149,49 +198,60 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
 }
 
 fn fail(req: PdfRequest, err: &str) {
+    let e = err.to_string();
     match req {
-        PdfRequest::Open { reply, .. } => {
-            let _ = reply.send(Err(err.to_string()));
-        }
-        PdfRequest::Close { reply, .. } => {
-            let _ = reply.send(Err(err.to_string()));
-        }
-        PdfRequest::Render { reply, .. } => {
-            let _ = reply.send(Err(err.to_string()));
-        }
-        PdfRequest::PageText { reply, .. } => {
-            let _ = reply.send(Err(err.to_string()));
-        }
+        PdfRequest::Open { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::Close { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::Render { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::PageText { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::RotatePages { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
     }
 }
 
-fn open_doc(
-    pdfium: &'static Pdfium,
-    docs: &mut HashMap<u32, PdfDocument<'static>>,
-    next_id: &mut u32,
-    path: PathBuf,
-    password: Option<String>,
-) -> Result<DocInfo, String> {
-    let doc = pdfium
-        .load_pdf_from_file(&path, password.as_deref())
-        .map_err(|e| friendly_open_error(e))?;
-
-    let pages: Vec<PageDims> = doc
+fn make_info(id: u32, entry: &OpenDoc) -> DocInfo {
+    let pages: Vec<PageDims> = entry
+        .doc
         .pages()
         .iter()
         .map(|p| PageDims { width: p.width().value, height: p.height().value })
         .collect();
 
-    let title = doc
+    let title = entry
+        .doc
         .metadata()
         .get(PdfDocumentMetadataTagType::Title)
         .map(|t| t.value().to_string())
         .filter(|t| !t.is_empty());
 
+    DocInfo {
+        id,
+        page_count: pages.len() as u16,
+        pages,
+        title,
+        path: entry.path.to_string_lossy().into_owned(),
+    }
+}
+
+fn open_doc(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    next_id: &mut u32,
+    path: PathBuf,
+    password: Option<String>,
+) -> Result<DocInfo, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("Could not read file: {e}"))?;
+    let doc = pdfium
+        .load_pdf_from_byte_vec(bytes, password.as_deref())
+        .map_err(friendly_open_error)?;
+
     let id = *next_id;
     *next_id += 1;
-    let info = DocInfo { id, page_count: pages.len() as u16, pages, title };
-    docs.insert(id, doc);
+    let entry = OpenDoc { doc, path };
+    let info = make_info(id, &entry);
+    docs.insert(id, entry);
     Ok(info)
 }
 
@@ -205,12 +265,12 @@ fn friendly_open_error(e: PdfiumError) -> String {
 }
 
 fn render_page(
-    docs: &HashMap<u32, PdfDocument<'static>>,
+    docs: &HashMap<u32, OpenDoc>,
     id: u32,
     index: u16,
     target_width: u32,
 ) -> Result<RenderedPage, String> {
-    let doc = docs.get(&id).ok_or("Document is not open")?;
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
     let page = doc
         .pages()
         .get(index.into())
@@ -242,16 +302,189 @@ fn render_page(
     })
 }
 
-fn page_text(
-    docs: &HashMap<u32, PdfDocument<'static>>,
-    id: u32,
-    index: u16,
-) -> Result<String, String> {
-    let doc = docs.get(&id).ok_or("Document is not open")?;
+fn page_text(docs: &HashMap<u32, OpenDoc>, id: u32, index: u16) -> Result<String, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
     let page = doc
         .pages()
         .get(index.into())
         .map_err(|e| format!("Page {index} not found: {e}"))?;
     let text = page.text().map_err(|e| format!("Text extraction failed: {e}"))?;
     Ok(text.all())
+}
+
+fn rotation_to_turns(r: PdfPageRenderRotation) -> i8 {
+    match r {
+        PdfPageRenderRotation::None => 0,
+        PdfPageRenderRotation::Degrees90 => 1,
+        PdfPageRenderRotation::Degrees180 => 2,
+        PdfPageRenderRotation::Degrees270 => 3,
+    }
+}
+
+fn turns_to_rotation(turns: i8) -> PdfPageRenderRotation {
+    match turns.rem_euclid(4) {
+        1 => PdfPageRenderRotation::Degrees90,
+        2 => PdfPageRenderRotation::Degrees180,
+        3 => PdfPageRenderRotation::Degrees270,
+        _ => PdfPageRenderRotation::None,
+    }
+}
+
+fn rotate_pages(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    indices: &[u16],
+    quarter_turns: i8,
+) -> Result<DocInfo, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    for &index in indices {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(index.into())
+            .map_err(|e| format!("Page {index} not found: {e}"))?;
+        let current = page.rotation().unwrap_or(PdfPageRenderRotation::None);
+        page.set_rotation(turns_to_rotation(rotation_to_turns(current) + quarter_turns));
+    }
+    Ok(make_info(id, entry))
+}
+
+fn delete_pages(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    mut indices: Vec<u16>,
+) -> Result<DocInfo, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    if indices.len() >= entry.doc.pages().len() as usize {
+        return Err("Cannot delete every page — a PDF needs at least one".to_string());
+    }
+    // Descending order so earlier deletions don't shift later indices.
+    indices.sort_unstable_by(|a, b| b.cmp(a));
+    indices.dedup();
+    for index in indices {
+        entry
+            .doc
+            .pages()
+            .get(index.into())
+            .map_err(|e| format!("Page {index} not found: {e}"))?
+            .delete()
+            .map_err(|e| format!("Could not delete page {index}: {e}"))?;
+    }
+    Ok(make_info(id, entry))
+}
+
+fn reorder_pages(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    order: &[u16],
+) -> Result<DocInfo, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    let count = entry.doc.pages().len();
+    {
+        let mut check: Vec<u16> = order.to_vec();
+        check.sort_unstable();
+        if check.len() != count as usize || check.iter().enumerate().any(|(i, &v)| i as u16 != v) {
+            return Err("Reorder must be a permutation of all pages".to_string());
+        }
+    }
+
+    // PDFium has no in-place move; rebuild into a fresh document in the new
+    // order. Page content, annotations and resources are copied; exotic
+    // document-level extras (bookmarks pointing at pages) may not survive.
+    let mut new_doc = pdfium
+        .create_new_pdf()
+        .map_err(|e| format!("Could not create document: {e}"))?;
+    for (dest, &src) in order.iter().enumerate() {
+        new_doc
+            .pages_mut()
+            .copy_page_from_document(&entry.doc, src.into(), dest as PdfPageIndex)
+            .map_err(|e| format!("Could not move page {src}: {e}"))?;
+    }
+    entry.doc = new_doc;
+    Ok(make_info(id, entry))
+}
+
+fn save_doc(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    path: Option<PathBuf>,
+) -> Result<DocInfo, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    let target = path.unwrap_or_else(|| entry.path.clone());
+    entry
+        .doc
+        .save_to_file(&target)
+        .map_err(|e| format!("Save failed: {e}"))?;
+    entry.path = target;
+    Ok(make_info(id, entry))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End-to-end engine test against the real pdfium.dll: build a 3-page PDF,
+    /// then rotate, reorder, delete, save, and re-open it.
+    #[test]
+    fn organize_roundtrip() {
+        let Ok(pdfium) = bind_pdfium(None) else {
+            eprintln!("pdfium.dll not present — skipping engine test");
+            return;
+        };
+        let pdfium: &'static Pdfium = Box::leak(Box::new(pdfium));
+
+        // Three pages with distinct heights so order is observable.
+        let tmp = std::env::temp_dir().join("zugapdf-test-organize.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            for height in [500.0, 600.0, 700.0] {
+                doc.pages_mut()
+                    .create_page_at_end(PdfPagePaperSize::Custom(
+                        PdfPoints::new(400.0),
+                        PdfPoints::new(height),
+                    ))
+                    .unwrap();
+            }
+            doc.save_to_file(&tmp).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        assert_eq!(info.page_count, 3);
+        let heights: Vec<i32> = info.pages.iter().map(|p| p.height as i32).collect();
+        assert_eq!(heights, vec![500, 600, 700]);
+
+        // Rotate page 0 by 90°: reported dims must swap (or rotation isn't
+        // reflected in rendering either — this assert guards that contract).
+        let info = rotate_pages(&mut docs, info.id, &[0], 1).unwrap();
+        assert_eq!(info.pages[0].width as i32, 500);
+        assert_eq!(info.pages[0].height as i32, 400);
+
+        // Un-rotate, then reorder [2, 0, 1].
+        let info = rotate_pages(&mut docs, info.id, &[0], -1).unwrap();
+        let info = reorder_pages(pdfium, &mut docs, info.id, &[2, 0, 1]).unwrap();
+        let heights: Vec<i32> = info.pages.iter().map(|p| p.height as i32).collect();
+        assert_eq!(heights, vec![700, 500, 600]);
+
+        // Delete the middle page.
+        let info = delete_pages(&mut docs, info.id, vec![1]).unwrap();
+        let heights: Vec<i32> = info.pages.iter().map(|p| p.height as i32).collect();
+        assert_eq!(heights, vec![700, 600]);
+
+        // Refuse to delete every remaining page.
+        assert!(delete_pages(&mut docs, info.id, vec![0, 1]).is_err());
+
+        // Save in place (byte-vec loading means no file-handle conflict),
+        // re-open, and confirm the changes persisted.
+        let info = save_doc(&mut docs, info.id, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        assert_eq!(reopened.page_count, 2);
+        let heights: Vec<i32> = reopened.pages.iter().map(|p| p.height as i32).collect();
+        assert_eq!(heights, vec![700, 600]);
+
+        drop(info);
+        let _ = std::fs::remove_file(tmp);
+    }
 }
