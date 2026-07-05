@@ -956,6 +956,31 @@ mod tests {
         let _ = std::fs::remove_file(tmp);
     }
 
+    /// The hand-rolled testdata fixtures must parse and render in our engine.
+    #[test]
+    fn testdata_fixtures_parse_and_render() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata");
+        let fixtures = [("Alpha.pdf", 3u16), ("Bravo.pdf", 2), ("Charlie.pdf", 4)];
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        for (name, expected_pages) in fixtures {
+            let path = dir.join(name);
+            if !path.exists() {
+                eprintln!("{name} not generated — skipping");
+                continue;
+            }
+            let info = open_doc(pdfium, &mut docs, &mut next_id, path, None)
+                .unwrap_or_else(|e| panic!("{name} failed to open: {e}"));
+            assert_eq!(info.page_count, expected_pages, "{name} page count");
+            let rendered = render_page(&docs, info.id, 0, 300, true)
+                .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
+            assert!(rendered.width_px > 0);
+        }
+    }
+
     /// Merging appends the other file's pages and survives save → reopen.
     #[test]
     fn merge_roundtrip() {
