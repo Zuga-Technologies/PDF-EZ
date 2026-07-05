@@ -5658,6 +5658,7 @@ dependencies = [
  "lopdf",
  "pdfium-render",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

@@ -7,7 +7,7 @@ use std::sync::mpsc::channel;
 
 use pdf_worker::{
     AnnotInfo, CompressOutcome, DocInfo, FieldInfo, ObjInfo, PdfRequest, PdfWorkerHandle,
-    RenderedPage, Rgba, SearchHit,
+    RedactMatch, RedactRect, RenderedPage, Rgba, SearchHit,
 };
 use tauri::Manager;
 
@@ -299,6 +299,25 @@ async fn delete_annotation(
 }
 
 #[tauri::command]
+async fn find_patterns(
+    app: tauri::AppHandle,
+    id: u32,
+    kinds: Vec<String>,
+) -> Result<Vec<RedactMatch>, String> {
+    engine_call(app, move |reply| PdfRequest::FindPatterns { id, kinds, reply }).await
+}
+
+#[tauri::command]
+async fn redact_regions(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    rects: Vec<RedactRect>,
+) -> Result<Vec<ObjInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::RedactRegions { id, page, rects, reply }).await
+}
+
+#[tauri::command]
 fn check_license(app: tauri::AppHandle) -> Result<license::LicenseStatus, String> {
     Ok(license::check(&app_data_dir(&app)?))
 }
@@ -350,6 +369,8 @@ pub fn run() {
             add_note,
             add_ink,
             delete_annotation,
+            find_patterns,
+            redact_regions,
             check_license,
             activate_license_file
         ])

@@ -80,6 +80,33 @@ pub struct SearchHit {
     pub top: f32,
 }
 
+/// A sensitive-data match found by the pattern sweep. Bounds are display space
+/// (what the UI draws), so the same rect round-trips straight back into a
+/// redaction request.
+#[derive(Serialize, Clone)]
+pub struct RedactMatch {
+    pub page: u16,
+    /// "SSN" | "Email" | "Card" | "Phone"
+    pub kind: String,
+    /// The matched text, partially masked so the preview list never re-exposes
+    /// the full secret it is about to remove.
+    pub sample: String,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+/// A rectangle to redact, in display space (origin bottom-left of the rendered,
+/// rotated page) — the same space every coordinate-carrying command speaks.
+#[derive(serde::Deserialize, Clone, Copy)]
+pub struct RedactRect {
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct AnnotInfo {
     pub page: u16,
@@ -299,6 +326,23 @@ pub enum PdfRequest {
         index: u16,
         reply: Sender<Result<Vec<AnnotInfo>, String>>,
     },
+    /// Scan every page for the selected sensitive-data patterns. Read-only —
+    /// returns candidate rects for the UI to preview before redacting.
+    FindPatterns {
+        id: u32,
+        /// Any of "SSN" | "Email" | "Card" | "Phone".
+        kinds: Vec<String>,
+        reply: Sender<Result<Vec<RedactMatch>, String>>,
+    },
+    /// TRUE redaction: permanently remove every page object touching a rect,
+    /// then lay an opaque black box over it. Content is gone from the file, not
+    /// merely hidden.
+    RedactRegions {
+        id: u32,
+        page: u16,
+        rects: Vec<RedactRect>,
+        reply: Sender<Result<Vec<ObjInfo>, String>>,
+    },
 }
 
 struct OpenDoc {
@@ -510,6 +554,12 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                     PdfRequest::DeleteAnnotation { id, page, index, reply } => {
                         let _ = reply.send(delete_annotation(&mut docs, id, page, index));
                     }
+                    PdfRequest::FindPatterns { id, kinds, reply } => {
+                        let _ = reply.send(find_patterns(&docs, id, &kinds));
+                    }
+                    PdfRequest::RedactRegions { id, page, rects, reply } => {
+                        let _ = reply.send(redact_regions(&mut docs, id, page, &rects));
+                    }
                 }
             }
         })
@@ -549,6 +599,8 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::AddNote { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddInk { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::DeleteAnnotation { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::FindPatterns { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::RedactRegions { reply, .. } => drop(reply.send(Err(e))),
     }
 }
 
@@ -1935,6 +1987,227 @@ fn delete_annotation(
     annot_infos(&entry.doc, page_index)
 }
 
+// ---- redaction ----
+
+/// Two axis-aligned rects (each `left, bottom, right, top`) overlap?
+fn rects_intersect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+}
+
+/// TRUE redaction: for every page object whose bounds touch a redaction rect,
+/// remove it outright (its operators vanish when the content stream is
+/// regenerated — this is real deletion, not a cover-up), then draw an opaque
+/// black box over each rect as the visible mark. Over-removes a text run that
+/// only partly overlaps a rect; that is the safe failure direction — better to
+/// drop a neighbouring word than to leak the redacted one.
+fn redact_regions(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    rects: &[RedactRect],
+) -> Result<Vec<ObjInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    if rects.is_empty() {
+        return obj_infos(&entry.doc, page_index);
+    }
+
+    // Display-space rects → page space, and collect the objects they touch.
+    let (page_rects, to_remove) = {
+        let page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let ctx = space_ctx(&page);
+        let page_rects: Vec<(f32, f32, f32, f32)> = rects
+            .iter()
+            .map(|r| rect_to_page(ctx, r.left, r.bottom, r.right, r.top))
+            .collect();
+        let mut to_remove: Vec<u16> = Vec::new();
+        for (i, object) in page.objects().iter().enumerate() {
+            let Ok(b) = object.bounds() else { continue };
+            let ob = (b.left().value, b.bottom().value, b.right().value, b.top().value);
+            if page_rects.iter().any(|&r| rects_intersect(r, ob)) {
+                to_remove.push(i as u16);
+            }
+        }
+        (page_rects, to_remove)
+    };
+
+    // Build the black cover boxes before taking the page mutably (each borrows
+    // the document immutably, same as add_ink builds its strokes up front).
+    let mut boxes = Vec::with_capacity(page_rects.len());
+    for &(l, b, r, t) in &page_rects {
+        let rect = PdfRect::new(
+            PdfPoints::new(b),
+            PdfPoints::new(l),
+            PdfPoints::new(t),
+            PdfPoints::new(r),
+        );
+        let black = PdfColor::new(0, 0, 0, 255);
+        let path = PdfPagePathObject::new_rect(
+            &entry.doc,
+            rect,
+            Some(black),
+            Some(PdfPoints::new(1.0)),
+            Some(black),
+        )
+        .map_err(|e| format!("Could not build redaction box: {e}"))?;
+        boxes.push(path);
+    }
+
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        // Descending so each removal keeps the remaining indices valid.
+        for &i in to_remove.iter().rev() {
+            let removed = page
+                .objects_mut()
+                .remove_object_at_index(i.into())
+                .map_err(|e| format!("Could not remove redacted content: {e}"))?;
+            // Same double-free hazard as delete_page_object — leak the wrapper.
+            std::mem::forget(removed);
+        }
+        for path in boxes {
+            page.objects_mut()
+                .add_path_object(path)
+                .map_err(|e| format!("Could not place redaction box: {e}"))?;
+        }
+        page.regenerate_content().map_err(|e| format!("Could not update the page: {e}"))?;
+    }
+    obj_infos(&entry.doc, page_index)
+}
+
+/// Cap on returned matches so a pathological document can't build an unbounded
+/// preview list.
+const MAX_REDACT_MATCHES: usize = 1000;
+
+fn pattern_regexes(kinds: &[String]) -> Vec<(&'static str, regex::Regex)> {
+    let mut out = Vec::new();
+    for k in kinds {
+        let spec: Option<(&str, &str)> = match k.as_str() {
+            "SSN" => Some(("SSN", r"\b\d{3}-\d{2}-\d{4}\b")),
+            "Email" => {
+                Some(("Email", r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"))
+            }
+            "Phone" => {
+                Some(("Phone", r"(?:\+?1[ .\-]?)?\(?\d{3}\)?[ .\-]?\d{3}[ .\-]?\d{4}"))
+            }
+            "Card" => Some(("Card", r"\b(?:\d[ \-]?){13,19}\b")),
+            _ => None,
+        };
+        if let Some((label, pat)) = spec {
+            if let Ok(re) = regex::Regex::new(pat) {
+                out.push((label, re));
+            }
+        }
+    }
+    out
+}
+
+/// Luhn check — filters the loose 13–19 digit card pattern down to real numbers.
+fn luhn_ok(s: &str) -> bool {
+    let digits: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
+    if !(13..=19).contains(&digits.len()) {
+        return false;
+    }
+    let mut sum = 0u32;
+    for (i, &d) in digits.iter().rev().enumerate() {
+        let v = if i % 2 == 1 {
+            let x = d * 2;
+            if x > 9 { x - 9 } else { x }
+        } else {
+            d
+        };
+        sum += v;
+    }
+    sum % 10 == 0
+}
+
+/// Keep the first and last two characters, mask the middle — enough for a user
+/// to recognise the match without the preview list re-printing the secret.
+fn mask_sample(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= 4 {
+        return "•".repeat(chars.len());
+    }
+    let mut out: String = chars[..2].iter().collect();
+    out.push_str(&"•".repeat(chars.len() - 4));
+    out.extend(chars[chars.len() - 2..].iter());
+    out
+}
+
+/// Read-only sweep for sensitive-data patterns across every page. Returns
+/// candidate rects (display space) for the UI to preview; nothing is altered.
+fn find_patterns(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    kinds: &[String],
+) -> Result<Vec<RedactMatch>, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+    let regexes = pattern_regexes(kinds);
+    if regexes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    'pages: for (page_index, page) in doc.pages().iter().enumerate() {
+        let ctx = space_ctx(&page);
+        let Ok(text) = page.text() else { continue };
+
+        // Rebuild the page string ourselves so byte offsets line up with a
+        // parallel per-character bounds table.
+        let mut s = String::new();
+        let mut spans: Vec<(usize, Option<PdfRect>)> = Vec::new();
+        for c in text.chars().iter() {
+            let Some(ch) = c.unicode_char() else { continue };
+            spans.push((s.len(), c.tight_bounds().ok()));
+            s.push(ch);
+        }
+
+        for (label, re) in &regexes {
+            for m in re.find_iter(&s) {
+                if *label == "Card" && !luhn_ok(m.as_str()) {
+                    continue;
+                }
+                // Union the bounds of every character inside the match.
+                let (mut l, mut b, mut r, mut t) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for (start, bounds) in &spans {
+                    if *start >= m.start() && *start < m.end() {
+                        if let Some(rc) = bounds {
+                            l = l.min(rc.left().value);
+                            b = b.min(rc.bottom().value);
+                            r = r.max(rc.right().value);
+                            t = t.max(rc.top().value);
+                        }
+                    }
+                }
+                if l > r || b > t {
+                    continue; // no positioned glyphs for this match
+                }
+                let (left, bottom, right, top) = rect_to_display(ctx, l, b, r, t);
+                out.push(RedactMatch {
+                    page: page_index as u16,
+                    kind: label.to_string(),
+                    sample: mask_sample(m.as_str()),
+                    left,
+                    bottom,
+                    right,
+                    top,
+                });
+                if out.len() >= MAX_REDACT_MATCHES {
+                    break 'pages;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2169,6 +2442,82 @@ mod tests {
 
         let _ = std::fs::remove_file(png);
         let _ = std::fs::remove_file(scan);
+    }
+
+    /// Pattern sweep finds an SSN + email; redaction truly removes the content
+    /// (gone from extracted text, survives save→reopen) without touching an
+    /// unrelated line, and the preview sample never re-exposes the secret.
+    #[test]
+    fn redaction_removes_content_and_finds_patterns() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let src = std::env::temp_dir().join("zugapdf-test-redact.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            let font = doc.fonts_mut().helvetica();
+            let mut page =
+                doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            for (i, line) in [
+                "Employee SSN: 123-45-6789 on file.",
+                "Contact: jane.doe@example.com anytime.",
+                "This line has nothing sensitive at all.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut obj =
+                    PdfPageTextObject::new(&doc, *line, font, PdfPoints::new(18.0)).unwrap();
+                obj.translate(PdfPoints::new(60.0), PdfPoints::new(700.0 - 40.0 * i as f32))
+                    .unwrap();
+                page.objects_mut().add_text_object(obj).unwrap();
+            }
+            doc.save_to_file(&src).unwrap();
+        }
+
+        let info = open_doc(pdfium, &mut docs, &mut next_id, src.clone(), None).unwrap();
+
+        // Read-only sweep finds both patterns; the sample is masked.
+        let matches =
+            find_patterns(&docs, info.id, &["SSN".to_string(), "Email".to_string()]).unwrap();
+        assert!(matches.iter().any(|m| m.kind == "SSN"), "SSN not found");
+        assert!(matches.iter().any(|m| m.kind == "Email"), "Email not found");
+        let ssn = matches.iter().find(|m| m.kind == "SSN").unwrap();
+        assert!(
+            !ssn.sample.contains("6789"),
+            "preview must not re-expose the secret: {}",
+            ssn.sample
+        );
+
+        // Redact the SSN's rectangle.
+        let rect = RedactRect { left: ssn.left, bottom: ssn.bottom, right: ssn.right, top: ssn.top };
+        redact_regions(&mut docs, info.id, ssn.page, &[rect]).unwrap();
+
+        // In memory: the SSN is truly gone; the unrelated last line survives.
+        let text_now =
+            docs.get(&info.id).unwrap().doc.pages().get(0).unwrap().text().unwrap().all();
+        assert!(
+            !text_now.contains("123-45-6789"),
+            "redacted SSN still extractable: {text_now}"
+        );
+        assert!(
+            text_now.contains("nothing sensitive"),
+            "redaction destroyed an unrelated line: {text_now}"
+        );
+
+        // Persist and reopen — the content must not come back from the file.
+        save_doc(pdfium, &mut docs, info.id, None, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, src.clone(), None).unwrap();
+        let text_after =
+            docs.get(&reopened.id).unwrap().doc.pages().get(0).unwrap().text().unwrap().all();
+        assert!(
+            !text_after.contains("123-45-6789"),
+            "SSN leaked back into the saved file: {text_after}"
+        );
+
+        let _ = std::fs::remove_file(src);
     }
 
     /// Export: pages → images on disk, text → .txt, images → new PDF.

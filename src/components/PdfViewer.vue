@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type FieldInfo, type ObjInfo, type SearchHit } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type ObjInfo, type RedactMatch, type SearchHit } from "../lib/api";
 import Icon from "./Icon.vue";
 
 interface RenderSlot {
@@ -47,7 +47,7 @@ const THUMB_CSS_WIDTH = 132;
 
 // ---- annotation tools ----
 
-type Tool = "select" | "highlight" | "note" | "ink" | "edit";
+type Tool = "select" | "highlight" | "note" | "ink" | "edit" | "redact";
 const tool = ref<Tool>("select");
 const HIGHLIGHT_COLOR = { r: 255, g: 220, b: 60, a: 128 };
 const INK_COLOR = { r: 43, g: 74, b: 203, a: 255 };
@@ -64,6 +64,108 @@ interface DragState {
 const drag = ref<DragState | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
+
+// ---- redaction ----
+// A region marked for removal. Coordinates are display-space PDF points
+// (bottom-left origin) — the same space the engine expects.
+interface PendingRedaction {
+  page: number;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+const pendingRedactions = ref<PendingRedaction[]>([]);
+const redactCount = computed(() => pendingRedactions.value.length);
+const redactScanOpen = ref(false);
+const scanning = ref(false);
+const redactKinds = reactive({ SSN: true, Email: true, Card: true, Phone: false });
+const redactMatches = ref<(RedactMatch & { chosen: boolean })[]>([]);
+
+function redactCss(r: PendingRedaction) {
+  const scale = POINTS_TO_CSS * zoom.value;
+  const pageH = doc.value!.pages[r.page].height;
+  return {
+    left: r.left * scale + "px",
+    top: (pageH - r.top) * scale + "px",
+    width: Math.max((r.right - r.left) * scale, 2) + "px",
+    height: Math.max((r.top - r.bottom) * scale, 2) + "px",
+  };
+}
+
+function removePendingRedaction(target: PendingRedaction) {
+  pendingRedactions.value = pendingRedactions.value.filter((r) => r !== target);
+}
+
+async function scanForPatterns() {
+  if (!doc.value || busy.value) return;
+  const kinds = Object.entries(redactKinds)
+    .filter(([, on]) => on)
+    .map(([k]) => k);
+  if (!kinds.length) return;
+  scanning.value = true;
+  error.value = null;
+  try {
+    const found = await api.findPatterns(doc.value.id, kinds);
+    redactMatches.value = found.map((m) => ({ ...m, chosen: true }));
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    scanning.value = false;
+  }
+}
+
+function addChosenMatches() {
+  for (const m of redactMatches.value) {
+    if (!m.chosen) continue;
+    pendingRedactions.value.push({
+      page: m.page,
+      left: m.left,
+      bottom: m.bottom,
+      right: m.right,
+      top: m.top,
+    });
+  }
+  redactMatches.value = [];
+  redactScanOpen.value = false;
+  tool.value = "redact";
+  status.value = `${pendingRedactions.value.length} region(s) marked — review, then Apply to remove`;
+}
+
+async function applyRedactions() {
+  if (!doc.value || busy.value || !pendingRedactions.value.length) return;
+  const n = pendingRedactions.value.length;
+  const ok = await confirm(
+    `Permanently remove the content under ${n} marked region(s)? This deletes the underlying text and images and cannot be undone.`,
+    { title: "Apply redactions", kind: "warning" },
+  );
+  if (!ok) return;
+  busy.value = true;
+  error.value = null;
+  try {
+    const byPage = new Map<number, PendingRedaction[]>();
+    for (const r of pendingRedactions.value) {
+      const list = byPage.get(r.page) ?? [];
+      list.push(r);
+      byPage.set(r.page, list);
+    }
+    for (const [page, rects] of byPage) {
+      await api.redactRegions(
+        doc.value.id,
+        page,
+        rects.map((r) => ({ left: r.left, bottom: r.bottom, right: r.right, top: r.top })),
+      );
+    }
+    pendingRedactions.value = [];
+    dirty.value = true;
+    for (const page of byPage.keys()) await refreshPage(page);
+    status.value = `Content removed from ${byPage.size} page(s). Save to keep it.`;
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
 
 // ---- watermark / header-footer (stamp) ----
 const stampOpen = ref(false);
@@ -809,6 +911,11 @@ async function onPagePointerUp(index: number) {
     await addAnnotation(index, mark, (id) =>
       api.addInk(id, index, [stroke], INK_COLOR, INK_WIDTH_PT),
     );
+  } else if (tool.value === "redact") {
+    const [x0, y0] = cssToPdf(index, Math.min(d.startX, d.x), Math.max(d.startY, d.y));
+    const [x1, y1] = cssToPdf(index, Math.max(d.startX, d.x), Math.min(d.startY, d.y));
+    if (Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return; // accidental click
+    pendingRedactions.value.push({ page: index, left: x0, bottom: y0, right: x1, top: y1 });
   }
 }
 
@@ -1256,6 +1363,68 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="redactScanOpen && doc" class="protect-modal" @pointerdown.self="redactScanOpen = false">
+      <div class="protect-card scan-card">
+        <h2>Find sensitive data</h2>
+        <p class="protect-hint">
+          Scans every page for these patterns and marks each match for redaction. Nothing is
+          removed until you Apply — review the list first.
+        </p>
+        <div class="scan-kinds">
+          <label><input type="checkbox" v-model="redactKinds.SSN" /> Social Security numbers</label>
+          <label><input type="checkbox" v-model="redactKinds.Email" /> Email addresses</label>
+          <label><input type="checkbox" v-model="redactKinds.Card" /> Credit-card numbers</label>
+          <label><input type="checkbox" v-model="redactKinds.Phone" /> Phone numbers</label>
+        </div>
+        <button class="primary scan-run" :disabled="scanning" @click="scanForPatterns">
+          {{ scanning ? "Scanning…" : "Scan document" }}
+        </button>
+
+        <div v-if="redactMatches.length" class="scan-results">
+          <p class="scan-count">{{ redactMatches.length }} match(es) found</p>
+          <ul>
+            <li v-for="(m, mi) in redactMatches" :key="'m' + mi">
+              <label>
+                <input type="checkbox" v-model="m.chosen" />
+                <span class="scan-kind">{{ m.kind }}</span>
+                <span class="scan-sample">{{ m.sample }}</span>
+                <span class="scan-page">p.{{ m.page + 1 }}</span>
+              </label>
+            </li>
+          </ul>
+        </div>
+        <p v-else-if="!scanning && redactMatches" class="scan-empty"></p>
+
+        <div class="protect-actions">
+          <button type="button" @click="((redactScanOpen = false), (redactMatches = []))">Cancel</button>
+          <span class="spacer"></span>
+          <button
+            class="primary"
+            :disabled="!redactMatches.some((m) => m.chosen)"
+            @click="addChosenMatches"
+          >
+            Mark {{ redactMatches.filter((m) => m.chosen).length }} for redaction
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="tool === 'redact' && doc" class="redact-bar">
+      <Icon name="square-dashed" />
+      <span class="redact-msg">
+        Drag boxes over anything to remove — {{ redactCount }} marked
+      </span>
+      <button class="ghost" :disabled="busy" @click="((redactScanOpen = true), (redactMatches = []))">
+        <Icon name="shield-alert" /> Find sensitive data
+      </button>
+      <button class="ghost" :disabled="!redactCount || busy" @click="pendingRedactions = []">
+        Clear
+      </button>
+      <button class="danger" :disabled="!redactCount || busy" @click="applyRedactions">
+        Apply &amp; remove
+      </button>
+    </div>
+
     <div class="body">
       <aside v-if="toolsOpen" class="tools-panel">
         <p class="tools-title">All tools</p>
@@ -1289,7 +1458,11 @@ onBeforeUnmount(() => {
         <button class="tool-item" :disabled="!doc || busy" @click="ocrOpen = true">
           <Icon name="scan-text" /> Scan &amp; OCR
         </button>
-        <p class="tools-soon">Coming: Redact · Sign</p>
+        <button class="tool-item" :disabled="!doc || busy" @click="tool = tool === 'redact' ? 'select' : 'redact'">
+          <Icon name="square-dashed" /> Redact
+          <span v-if="tool === 'redact'" class="tool-state">on</span>
+        </button>
+        <p class="tools-soon">Coming: Sign</p>
       </aside>
 
       <aside v-if="doc && railOpen" ref="rail" class="rail">
@@ -1337,6 +1510,8 @@ onBeforeUnmount(() => {
           @click="tool = tool === 'ink' ? 'select' : 'ink'"><Icon name="pen" /></button>
         <button class="iconbtn" :class="{ active: tool === 'edit' }" title="Edit — click page text to rewrite it, images to delete" aria-label="Edit tool"
           @click="tool = tool === 'edit' ? 'select' : 'edit'"><Icon name="type" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'redact' }" title="Redact — drag boxes over content to remove it" aria-label="Redact tool"
+          @click="tool = tool === 'redact' ? 'select' : 'redact'"><Icon name="square-dashed" /></button>
       </div>
 
       <div ref="scroller" class="well">
@@ -1385,6 +1560,28 @@ onBeforeUnmount(() => {
             <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
               <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
             </svg>
+            <div
+              v-if="drag && drag.page === index && tool === 'redact'"
+              class="live-redact"
+              :style="{
+                left: Math.min(drag.startX, drag.x) + 'px',
+                top: Math.min(drag.startY, drag.y) + 'px',
+                width: Math.abs(drag.x - drag.startX) + 'px',
+                height: Math.abs(drag.y - drag.startY) + 'px',
+              }"
+            ></div>
+
+            <template v-for="(r, ri) in pendingRedactions" :key="'r' + ri">
+              <div v-if="r.page === index" class="pending-redact" :style="redactCss(r)">
+                <button
+                  v-if="tool === 'redact'"
+                  class="annot-delete"
+                  title="Remove this redaction mark"
+                  @pointerdown.stop
+                  @click.stop="removePendingRedaction(r)"
+                ><Icon name="x" /></button>
+              </div>
+            </template>
 
             <template v-for="f in fieldsByPage.get(index) ?? []" :key="'f' + f.index">
               <div
@@ -1725,6 +1922,25 @@ onBeforeUnmount(() => {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.live-redact {
+  position: absolute;
+  background: rgba(20, 20, 20, 0.55);
+  outline: 1.5px solid var(--danger);
+  pointer-events: none;
+}
+.pending-redact {
+  position: absolute;
+  background: #111;
+  outline: 1.5px solid var(--danger);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.pending-redact .annot-delete {
+  top: -0.7rem;
+  right: -0.7rem;
+  width: 1.3rem;
+  height: 1.3rem;
+}
 .note-draft {
   position: absolute;
   z-index: 5;
@@ -1811,6 +2027,63 @@ onBeforeUnmount(() => {
 .protect-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
 .protect-actions .spacer { flex: 1; }
 button.danger { color: var(--danger); }
+
+/* redaction */
+.redact-bar {
+  position: fixed;
+  bottom: 1.1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem 0.4rem 0.75rem;
+  background: var(--chrome);
+  border: 1px solid var(--chrome-line);
+  border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35);
+  font-size: 0.85rem;
+}
+.redact-bar .redact-msg { color: var(--text-dim); margin-right: 0.25rem; }
+.redact-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.redact-bar button.danger {
+  border-color: var(--danger);
+  font-weight: 600;
+}
+.scan-card { width: 27rem; max-height: 80vh; overflow-y: auto; }
+.scan-kinds { display: flex; flex-direction: column; gap: 0.3rem; }
+.scan-kinds label,
+.scan-results label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.scan-card input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.scan-run { align-self: flex-start; }
+.scan-results { border-top: 1px solid var(--chrome-line); padding-top: 0.5rem; }
+.scan-count { font-size: 0.8rem; color: var(--text-dim); margin: 0 0 0.4rem; }
+.scan-results ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.scan-kind {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--danger);
+  min-width: 3.2rem;
+}
+.scan-sample { font-family: var(--mono, monospace); flex: 1; }
+.scan-page { color: var(--text-dim); font-size: 0.75rem; }
 .field-tint {
   position: absolute;
   background: rgba(80, 130, 240, 0.16);

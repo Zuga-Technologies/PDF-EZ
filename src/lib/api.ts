@@ -73,6 +73,23 @@ export interface Rgba {
   a: number;
 }
 
+export interface RedactMatch {
+  page: number;
+  kind: string; // "SSN" | "Email" | "Card" | "Phone"
+  sample: string; // masked
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+
+export interface RedactRect {
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+
 export interface LicenseStatus {
   licensed: boolean;
   email: string | null;
@@ -140,6 +157,10 @@ export const api = {
     invoke<AnnotInfo[]>("add_ink", { id, page, strokes, color, width }),
   deleteAnnotation: (id: number, page: number, index: number) =>
     invoke<AnnotInfo[]>("delete_annotation", { id, page, index }),
+  findPatterns: (id: number, kinds: string[]) =>
+    invoke<RedactMatch[]>("find_patterns", { id, kinds }),
+  redactRegions: (id: number, page: number, rects: RedactRect[]) =>
+    invoke<ObjInfo[]>("redact_regions", { id, page, rects }),
   checkLicense: () => invoke<LicenseStatus>("check_license"),
   activateLicenseFile: (leasePath: string) =>
     invoke<LicenseStatus>("activate_license_file", { leasePath }),
