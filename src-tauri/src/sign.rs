@@ -236,12 +236,34 @@ fn add_signature_field(doc: &mut Document, params: &SignParams) -> Result<(), St
     Ok(())
 }
 
-/// Positions of the `<` and `>` bounding the /Contents hex string.
+/// Positions of the `<` and `>` bounding the /Contents placeholder. Located by
+/// the long run of ASCII `0` the placeholder is made of — searching for the
+/// `/Contents` keyword would wrongly match a page's `/Contents` stream ref that
+/// every real PDF carries.
 fn find_contents_gap(bytes: &[u8]) -> Result<(usize, usize), String> {
-    let key = find(bytes, b"/Contents").ok_or("No /Contents in the signed PDF")?;
-    let lt = key + bytes[key..].iter().position(|&b| b == b'<').ok_or("Malformed /Contents")?;
-    let gt = lt + 1 + bytes[lt + 1..].iter().position(|&b| b == b'>').ok_or("Malformed /Contents")?;
-    Ok((lt, gt))
+    const MIN_RUN: usize = 1024; // far longer than any incidental hex string
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'0' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] == b'0' {
+            i += 1;
+        }
+        if i - start >= MIN_RUN {
+            let lt = start
+                .checked_sub(1)
+                .filter(|&p| bytes[p] == b'<')
+                .ok_or("Signature placeholder is not bracketed")?;
+            if bytes.get(i) == Some(&b'>') {
+                return Ok((lt, i));
+            }
+            return Err("Signature placeholder is not closed".to_string());
+        }
+    }
+    Err("No signature placeholder found in the serialized PDF".to_string())
 }
 
 /// Overwrite the fixed-width `/ByteRange [...]` placeholder with the real
@@ -436,12 +458,14 @@ mod tests {
         let signed = sign_pdf(minimal_pdf(), &pfx, "zuga", &params).unwrap();
 
         // 1. Byte range exactly tiles the file around the /Contents gap.
-        let (lt, gt) = find_contents_gap(&signed).unwrap();
+        // (find_contents_gap only works on the pre-sign placeholder; on signed
+        // output the gap is derived from the byte range itself.)
         let br = parse_byte_range(&signed);
+        let (lt, gt) = (br[1], br[2] - 1);
         assert_eq!(br[0], 0);
-        assert_eq!(br[1], lt, "range1 must end at the '<'");
-        assert_eq!(br[2], gt + 1, "range2 must start after the '>'");
-        assert_eq!(br[3], signed.len() - gt - 1, "range2 length");
+        assert_eq!(signed[lt], b'<', "range1 must end at the '<'");
+        assert_eq!(signed[gt], b'>', "range2 must start after the '>'");
+        assert_eq!(br[2] + br[3], signed.len(), "ranges must tile the file");
 
         // 2. /Contents decodes to a CMS SignedData.
         let der = hex_decode(&signed[lt + 1..gt]);

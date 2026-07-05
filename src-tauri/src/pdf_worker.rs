@@ -2612,6 +2612,44 @@ mod tests {
         let _ = std::fs::remove_file(src);
     }
 
+    /// Full live signing path: PDFium snapshot → lopdf sign → reload. Gated on
+    /// a local test identity at E:/test-id.pfx (password "test").
+    #[test]
+    fn sign_real_pdf_through_engine() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let pfx = std::path::Path::new("E:/test-id.pfx");
+        if !pfx.exists() {
+            eprintln!("no test pfx at E:/test-id.pfx — skipping");
+            return;
+        }
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !fixture.exists() {
+            return;
+        }
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, fixture, None).unwrap();
+        let out = std::env::temp_dir().join("zugapdf-engine-signed.pdf");
+        let qpdf = find_qpdf(None);
+        let signed = sign_document(
+            pdfium, &mut docs, info.id, pfx, "test", "Approved", "Buga", "", out.clone(),
+            qpdf.as_deref(),
+        )
+        .unwrap();
+        assert!(signed.page_count >= 1);
+
+        // The written file carries the signature and reopens in PDFium.
+        let bytes = std::fs::read(&out).unwrap();
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"adbe.pkcs7.detached"), "missing signature subfilter");
+        assert!(has(b"/ByteRange"), "missing byte range");
+        open_doc(pdfium, &mut docs, &mut next_id, out.clone(), None)
+            .expect("signed PDF must reopen");
+        let _ = std::fs::remove_file(&out);
+    }
+
     /// Export: pages → images on disk, text → .txt, images → new PDF.
     #[test]
     fn export_and_create_roundtrip() {
