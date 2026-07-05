@@ -26,10 +26,15 @@ const dragOver = ref<number | null>(null);
 
 /// `autofocus` is unreliable on dynamically inserted elements in Chromium —
 /// focus explicitly when the element mounts (and select text for overwrite).
+/// Deferred a frame: focusing during the opening click's pointerdown lets the
+/// click's default processing steal focus right back, instantly blur-closing
+/// the editor.
 const vFocus = {
   mounted(el: HTMLInputElement | HTMLTextAreaElement) {
-    el.focus();
-    if (el instanceof HTMLInputElement) el.select();
+    requestAnimationFrame(() => {
+      el.focus();
+      if (el instanceof HTMLInputElement) el.select();
+    });
   },
 };
 
@@ -465,6 +470,8 @@ function pagePoint(event: PointerEvent): [number, number] {
 function onPagePointerDown(event: PointerEvent, index: number) {
   if (!doc.value || busy.value) return;
   if (tool.value === "select") {
+    // Keep the page from taking focus — it would blur an opening field editor.
+    event.preventDefault();
     void selectAnnotAt(event, index);
     return;
   }
