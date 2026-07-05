@@ -1,6 +1,7 @@
 mod ap;
 mod license;
 mod pdf_worker;
+mod settings;
 mod sign;
 
 use std::path::PathBuf;
@@ -343,6 +344,19 @@ async fn sign_document(
 }
 
 #[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> Result<settings::Settings, String> {
+    Ok(settings::load(&app_data_dir(&app)?))
+}
+
+#[tauri::command]
+fn set_settings(
+    app: tauri::AppHandle,
+    settings: settings::Settings,
+) -> Result<settings::Settings, String> {
+    settings::save(&app_data_dir(&app)?, &settings)
+}
+
+#[tauri::command]
 fn check_license(app: tauri::AppHandle) -> Result<license::LicenseStatus, String> {
     Ok(license::check(&app_data_dir(&app)?))
 }
@@ -397,6 +411,8 @@ pub fn run() {
             find_patterns,
             redact_regions,
             sign_document,
+            get_settings,
+            set_settings,
             check_license,
             activate_license_file
         ])

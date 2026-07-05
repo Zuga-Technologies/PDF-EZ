@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type FieldInfo, type ObjInfo, type RedactMatch, type SearchHit } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type ObjInfo, type RedactMatch, type SearchHit, type Settings } from "../lib/api";
 import Icon from "./Icon.vue";
 
 interface RenderSlot {
@@ -130,6 +130,30 @@ function addChosenMatches() {
   redactScanOpen.value = false;
   tool.value = "redact";
   status.value = `${pendingRedactions.value.length} region(s) marked — review, then Apply to remove`;
+}
+
+// ---- settings (the network contract) ----
+const settingsOpen = ref(false);
+const settings = ref<Settings>({
+  allow_trusted_timestamp: false,
+  allow_online_verification: false,
+});
+
+async function loadSettings() {
+  try {
+    settings.value = await api.getSettings();
+  } catch {
+    /* defaults (fully offline) stand */
+  }
+}
+
+async function toggleSetting(key: keyof Settings) {
+  const next = { ...settings.value, [key]: !settings.value[key] };
+  try {
+    settings.value = await api.setSettings(next);
+  } catch (e) {
+    error.value = String(e);
+  }
 }
 
 // ---- signing (PAdES B-B) ----
@@ -1261,6 +1285,7 @@ onMounted(() => {
   pageObserver = makeObserver(scroller.value, visiblePages, renderPageIfStale, evictPage);
   thumbObserver = makeObserver(rail.value, visibleThumbs, renderThumbIfStale);
   window.addEventListener("keydown", onKeydown);
+  void loadSettings();
 });
 
 onBeforeUnmount(() => {
@@ -1312,7 +1337,57 @@ onBeforeUnmount(() => {
         <span class="zoom">{{ Math.round(zoom * 100) }}%</span>
         <button class="iconbtn" aria-label="Zoom in" title="Zoom in" @click="zoomIn"><Icon name="plus" /></button>
       </template>
+      <button class="iconbtn" title="Settings — network &amp; privacy" aria-label="Settings" @click="settingsOpen = true">
+        <Icon name="settings" />
+      </button>
     </header>
+
+    <div v-if="settingsOpen" class="protect-modal" @pointerdown.self="settingsOpen = false">
+      <div class="protect-card scan-card">
+        <h2>Network &amp; privacy</h2>
+        <p class="protect-hint">
+          ZugaPDF runs entirely on this machine. Nothing you open, edit, or save
+          is ever uploaded. The only features that can touch the network are the
+          two below — both off unless you turn them on here.
+        </p>
+        <div class="net-toggle">
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="settings.allow_trusted_timestamp"
+              @change="toggleSetting('allow_trusted_timestamp')"
+            />
+            <span class="switch-track"></span>
+          </label>
+          <div class="net-copy">
+            <strong>Trusted timestamp</strong>
+            <span>When signing, make one call to a timestamp authority so the signature proves <em>when</em> it was made (RFC&nbsp;3161). Off = self-asserted time only.</span>
+          </div>
+        </div>
+        <div class="net-toggle">
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="settings.allow_online_verification"
+              @change="toggleSetting('allow_online_verification')"
+            />
+            <span class="switch-track"></span>
+          </label>
+          <div class="net-copy">
+            <strong>Online signature verification</strong>
+            <span>When checking a signature, contact the issuer to see if the certificate was revoked (OCSP&nbsp;/&nbsp;CRL). Off = integrity, cryptography, and chain math are still verified — just not revocation.</span>
+          </div>
+        </div>
+        <p class="net-foot">
+          Every online action is a button you press, labeled with exactly what it
+          contacts. No telemetry, no accounts, no background calls — ever.
+        </p>
+        <div class="protect-actions">
+          <span class="spacer"></span>
+          <button class="primary" @click="settingsOpen = false">Done</button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="stampOpen && doc" class="protect-modal" @pointerdown.self="stampOpen = false">
       <div class="protect-card stamp-card">
@@ -2163,6 +2238,40 @@ button.danger { color: var(--danger); }
   accent-color: var(--accent);
 }
 .scan-run { align-self: flex-start; }
+.net-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--chrome-line);
+}
+.net-copy { display: flex; flex-direction: column; gap: 0.15rem; }
+.net-copy strong { font-size: 0.9rem; }
+.net-copy span { font-size: 0.78rem; color: var(--text-dim); line-height: 1.35; }
+.net-foot { font-size: 0.75rem; color: var(--text-dim); margin: 0.3rem 0 0; }
+.switch { position: relative; flex: none; width: 2.4rem; height: 1.35rem; cursor: pointer; margin-top: 0.1rem; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--chrome-line);
+  transition: background 0.15s;
+}
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track::after { transform: translateX(1.05rem); }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sign-pick {
   display: inline-flex;
   align-items: center;

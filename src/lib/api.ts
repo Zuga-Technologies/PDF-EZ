@@ -90,6 +90,11 @@ export interface RedactRect {
   top: number;
 }
 
+export interface Settings {
+  allow_trusted_timestamp: boolean;
+  allow_online_verification: boolean;
+}
+
 export interface LicenseStatus {
   licensed: boolean;
   email: string | null;
@@ -171,6 +176,8 @@ export const api = {
     out: string,
   ) =>
     invoke<DocInfo>("sign_document", { id, pfxPath, password, reason, name, location, out }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
   checkLicense: () => invoke<LicenseStatus>("check_license"),
   activateLicenseFile: (leasePath: string) =>
     invoke<LicenseStatus>("activate_license_file", { leasePath }),
