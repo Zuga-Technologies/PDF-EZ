@@ -58,6 +58,18 @@ interface PendingMark {
 const pendingMarks = ref<PendingMark[]>([]);
 let pendingKey = 0;
 
+/// Markup kinds the user may delete — never Link/Widget (form fields).
+const DELETABLE_KINDS = new Set([
+  "Highlight", "Text", "Ink", "Square", "Circle", "FreeText",
+  "Underline", "StrikeOut", "Squiggly", "Stamp",
+]);
+const selectedAnnot = ref<{
+  page: number;
+  index: number;
+  kind: string;
+  css: { left: number; top: number; width: number; height: number };
+} | null>(null);
+
 const title = computed(() => {
   // Filename, always — PDF metadata titles are junk too often ("(anonymous)",
   // "Microsoft Word - final_v2.docx") to put in the toolbar.
@@ -186,6 +198,7 @@ function applyInfo(info: DocInfo) {
     thumbs.push({ url: null, renderedWidth: 0, loading: false });
   }
   selected.value = new Set();
+  selectedAnnot.value = null;
   undoStack.length = 0; // annotation indices are stale after any page op
   // Already-visible elements get no new intersection event; refresh them.
   for (const index of visiblePages) renderPageIfStale(index);
@@ -313,7 +326,11 @@ function pagePoint(event: PointerEvent): [number, number] {
 }
 
 function onPagePointerDown(event: PointerEvent, index: number) {
-  if (!doc.value || busy.value || tool.value === "select") return;
+  if (!doc.value || busy.value) return;
+  if (tool.value === "select") {
+    void selectAnnotAt(event, index);
+    return;
+  }
   event.preventDefault();
   const [x, y] = pagePoint(event);
   if (tool.value === "note") {
@@ -361,6 +378,62 @@ async function onPagePointerUp(index: number) {
     await addAnnotation(index, mark, (id) =>
       api.addInk(id, index, [stroke], INK_COLOR, INK_WIDTH_PT),
     );
+  }
+}
+
+async function selectAnnotAt(event: PointerEvent, index: number) {
+  if (!doc.value) return;
+  const [cssX, cssY] = pagePoint(event);
+  const [px, py] = cssToPdf(index, cssX, cssY);
+  try {
+    const annots = await api.listAnnotations(doc.value.id, index);
+    const scale = POINTS_TO_CSS * zoom.value;
+    const pageH = doc.value.pages[index].height;
+    const PAD = 3; // points — makes thin ink strokes clickable
+    // Smallest containing annotation wins, so a note inside a highlight is
+    // still selectable.
+    const hit = annots
+      .filter((a) => DELETABLE_KINDS.has(a.kind))
+      .filter(
+        (a) =>
+          px >= a.left - PAD && px <= a.right + PAD && py >= a.bottom - PAD && py <= a.top + PAD,
+      )
+      .sort((a, b) => (a.right - a.left) * (a.top - a.bottom) - (b.right - b.left) * (b.top - b.bottom))[0];
+    selectedAnnot.value = hit
+      ? {
+          page: index,
+          index: hit.index,
+          kind: hit.kind,
+          css: {
+            left: hit.left * scale,
+            top: (pageH - hit.top) * scale,
+            width: (hit.right - hit.left) * scale,
+            height: (hit.top - hit.bottom) * scale,
+          },
+        }
+      : null;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+async function deleteSelectedAnnot() {
+  const sel = selectedAnnot.value;
+  selectedAnnot.value = null;
+  if (!sel || !doc.value) return;
+  try {
+    await api.deleteAnnotation(doc.value.id, sel.page, sel.index);
+    // Undo entries at higher indices on this page shift down by one.
+    for (let i = undoStack.length - 1; i >= 0; i--) {
+      const u = undoStack[i];
+      if (u.page !== sel.page) continue;
+      if (u.index === sel.index) undoStack.splice(i, 1);
+      else if (u.index > sel.index) u.index--;
+    }
+    dirty.value = true;
+    await refreshPage(sel.page);
+  } catch (e) {
+    error.value = String(e);
   }
 }
 
@@ -475,6 +548,9 @@ function onKeydown(e: KeyboardEvent) {
   } else if (e.key === "Escape") {
     tool.value = "select";
     drag.value = null;
+    selectedAnnot.value = null;
+  } else if (e.key === "Delete" && selectedAnnot.value) {
+    void deleteSelectedAnnot();
   } else if (e.key === "Delete" && selected.value.size) {
     void deleteSelection();
   }
@@ -604,6 +680,24 @@ onBeforeUnmount(() => {
             <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
               <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
             </svg>
+
+            <div
+              v-if="selectedAnnot && selectedAnnot.page === index"
+              class="annot-selection"
+              :style="{
+                left: selectedAnnot.css.left + 'px',
+                top: selectedAnnot.css.top + 'px',
+                width: selectedAnnot.css.width + 'px',
+                height: selectedAnnot.css.height + 'px',
+              }"
+            >
+              <button
+                class="annot-delete"
+                :title="`Delete ${selectedAnnot.kind.toLowerCase()} (Del)`"
+                @pointerdown.stop
+                @click.stop="deleteSelectedAnnot"
+              >×</button>
+            </div>
 
             <template v-for="mark in pendingMarks" :key="mark.key">
               <div
@@ -787,6 +881,26 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   padding: 0.35rem 0.5rem;
   resize: vertical;
+}
+.annot-selection {
+  position: absolute;
+  border: 2px dashed var(--accent);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.annot-delete {
+  position: absolute;
+  top: -0.85rem;
+  right: -0.85rem;
+  pointer-events: auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--chrome);
+  color: var(--danger);
+  font-size: 1rem;
 }
 .note-actions {
   display: flex;
