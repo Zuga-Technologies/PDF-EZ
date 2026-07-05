@@ -54,7 +54,7 @@ const fieldEditor = ref<{
   page: number;
   index: number;
   value: string;
-  css: { left: number; top: number; width: number; height: number };
+  css: { left: string; top: string; width: string; height: string };
 } | null>(null);
 
 async function loadFields(index: number) {
@@ -102,6 +102,35 @@ function submitFieldEditor() {
   const ed = fieldEditor.value;
   fieldEditor.value = null;
   if (ed) void applyFieldValue(ed.page, ed.index, ed.value);
+}
+
+function onEditorBlur(event: FocusEvent) {
+  // Only commit if this input still IS the active editor — Tab/Enter moves
+  // replace the editor before the old input blurs.
+  const fid = (event.target as HTMLElement).dataset.fid;
+  const ed = fieldEditor.value;
+  if (ed && fid === `${ed.page}:${ed.index}`) submitFieldEditor();
+}
+
+/// Reading-order text fields on a page (top-to-bottom, then left-to-right).
+function textFieldsInOrder(page: number): FieldInfo[] {
+  return (fieldsByPage.value.get(page) ?? [])
+    .filter((f) => f.kind === "Text")
+    .sort((a, b) => b.top - a.top || a.left - b.left);
+}
+
+/// Commit the current editor and move to the next/previous text field.
+function moveEditor(delta: number) {
+  const ed = fieldEditor.value;
+  if (!ed) return;
+  const ordered = textFieldsInOrder(ed.page);
+  const pos = ordered.findIndex((f) => f.index === ed.index);
+  const next = ordered[(pos + delta + ordered.length) % ordered.length];
+  void applyFieldValue(ed.page, ed.index, ed.value);
+  fieldEditor.value =
+    next && next.index !== ed.index
+      ? { page: ed.page, index: next.index, value: next.value, css: fieldCss(next) }
+      : null;
 }
 
 /// Returns true if the click landed on a form field and was handled.
@@ -924,14 +953,18 @@ onBeforeUnmount(() => {
 
             <input
               v-if="fieldEditor && fieldEditor.page === index"
+              :key="fieldEditor.page + ':' + fieldEditor.index"
+              :data-fid="fieldEditor.page + ':' + fieldEditor.index"
               class="field-editor"
               v-model="fieldEditor.value"
               :style="fieldEditor.css"
               autofocus
               @pointerdown.stop
-              @keydown.enter.prevent="submitFieldEditor"
+              @keydown.enter.prevent="moveEditor(1)"
+              @keydown.tab.exact.prevent="moveEditor(1)"
+              @keydown.shift.tab.prevent="moveEditor(-1)"
               @keydown.escape="fieldEditor = null"
-              @blur="submitFieldEditor"
+              @blur="onEditorBlur"
             />
 
             <template v-for="(h, hi) in searchHits" :key="'s' + hi">
