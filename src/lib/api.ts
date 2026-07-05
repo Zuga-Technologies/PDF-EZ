@@ -61,6 +61,8 @@ export const api = {
     invoke<DocInfo>("reorder_pages", { id, order }),
   saveDocument: (id: number, path?: string) =>
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
+  mergeAppend: (id: number, paths: string[]) =>
+    invoke<DocInfo>("merge_append", { id, paths }),
   listAnnotations: (id: number, page: number) =>
     invoke<AnnotInfo[]>("list_annotations", { id, page }),
   addHighlight: (

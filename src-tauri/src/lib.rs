@@ -87,6 +87,20 @@ async fn save_document(
 }
 
 #[tauri::command]
+async fn merge_append(
+    app: tauri::AppHandle,
+    id: u32,
+    paths: Vec<String>,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::MergeAppend {
+        id,
+        paths: paths.into_iter().map(PathBuf::from).collect(),
+        reply,
+    })
+    .await
+}
+
+#[tauri::command]
 async fn list_annotations(
     app: tauri::AppHandle,
     id: u32,
@@ -179,6 +193,7 @@ pub fn run() {
             delete_pages,
             reorder_pages,
             save_document,
+            merge_append,
             list_annotations,
             add_highlight,
             add_note,

@@ -107,6 +107,12 @@ pub enum PdfRequest {
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
     },
+    /// Append every page of each file (in order) to the end of the document.
+    MergeAppend {
+        id: u32,
+        paths: Vec<PathBuf>,
+        reply: Sender<Result<DocInfo, String>>,
+    },
     ListAnnotations {
         id: u32,
         page: u16,
@@ -254,6 +260,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path);
                         let _ = reply.send(result);
                     }
+                    PdfRequest::MergeAppend { id, paths, reply } => {
+                        let _ = reply.send(merge_append(pdfium, &mut docs, id, &paths));
+                    }
                     PdfRequest::ListAnnotations { id, page, reply } => {
                         let _ = reply.send(list_annotations(&docs, id, page));
                     }
@@ -288,6 +297,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::MergeAppend { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListAnnotations { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddHighlight { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddNote { reply, .. } => drop(reply.send(Err(e))),
@@ -580,6 +590,34 @@ fn save_doc(
         .save_to_file(&target)
         .map_err(|e| format!("Save failed: {e}"))?;
     entry.path = target;
+    Ok(make_info(id, entry))
+}
+
+fn merge_append(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    paths: &[PathBuf],
+) -> Result<DocInfo, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    for path in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("Could not read {name}: {e}"))?;
+        let other = pdfium
+            .load_pdf_from_byte_vec(bytes, None)
+            .map_err(|e| match e {
+                PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
+                    format!("{name} is password-protected — open it separately, remove the password, then merge")
+                }
+                other => format!("Could not open {name}: {other}"),
+            })?;
+        entry
+            .doc
+            .pages_mut()
+            .append(&other)
+            .map_err(|e| format!("Could not merge {name}: {e}"))?;
+    }
     Ok(make_info(id, entry))
 }
 
@@ -916,6 +954,43 @@ mod tests {
         assert_eq!(annots.len(), 2);
 
         let _ = std::fs::remove_file(tmp);
+    }
+
+    /// Merging appends the other file's pages and survives save → reopen.
+    #[test]
+    fn merge_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+
+        let base = std::env::temp_dir().join("zugapdf-test-merge-base.pdf");
+        let extra = std::env::temp_dir().join("zugapdf-test-merge-extra.pdf");
+        for (path, pages, height) in [(&base, 2, 700.0), (&extra, 3, 500.0)] {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            for _ in 0..pages {
+                doc.pages_mut()
+                    .create_page_at_end(PdfPagePaperSize::Custom(
+                        PdfPoints::new(400.0),
+                        PdfPoints::new(height),
+                    ))
+                    .unwrap();
+            }
+            doc.save_to_file(path).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, base.clone(), None).unwrap();
+        let info = merge_append(pdfium, &mut docs, info.id, &[extra.clone()]).unwrap();
+        assert_eq!(info.page_count, 5);
+        let heights: Vec<i32> = info.pages.iter().map(|p| p.height as i32).collect();
+        assert_eq!(heights, vec![700, 700, 500, 500, 500]);
+
+        save_doc(&mut docs, info.id, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, base.clone(), None).unwrap();
+        assert_eq!(reopened.page_count, 5);
+
+        let _ = std::fs::remove_file(base);
+        let _ = std::fs::remove_file(extra);
     }
 
     /// A placed highlight must actually RENDER — PDFium doesn't synthesize

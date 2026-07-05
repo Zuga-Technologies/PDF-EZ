@@ -494,6 +494,18 @@ async function refreshPage(index: number) {
 
 // ---- save ----
 
+async function mergeFiles() {
+  if (!doc.value || busy.value) return;
+  const picked = await open({
+    title: "Merge PDFs into this document",
+    filters: [{ name: "PDF documents", extensions: ["pdf"] }],
+    multiple: true,
+  });
+  const paths = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+  if (!paths.length) return;
+  await mutate(() => api.mergeAppend(doc.value!.id, paths));
+}
+
 async function saveNow() {
   if (!doc.value || !dirty.value || busy.value) return;
   busy.value = true;
@@ -577,6 +589,9 @@ onBeforeUnmount(() => {
       <template v-if="doc">
         <button :disabled="!dirty || busy" title="Ctrl+S" @click="saveNow">Save</button>
         <button :disabled="busy" title="Ctrl+Shift+S" @click="saveAs">Save as…</button>
+        <button :disabled="busy" title="Append pages from other PDFs" @click="mergeFiles">
+          Merge…
+        </button>
         <span class="divider"></span>
         <button
           :disabled="!selected.size || busy"
