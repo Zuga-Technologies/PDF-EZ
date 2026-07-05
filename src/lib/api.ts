@@ -98,6 +98,11 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  exportPages: (id: number, dir: string, jpeg: boolean, dpi: number) =>
+    invoke<number>("export_pages", { id, dir, jpeg, dpi }),
+  exportText: (id: number, path: string) => invoke<number>("export_text", { id, path }),
+  imagesToPdf: (paths: string[], out: string) =>
+    invoke<void>("images_to_pdf", { paths, out }),
   addWatermark: (id: number, text: string, size: number, opacity: number, diagonal: boolean) =>
     invoke<DocInfo>("add_watermark", { id, text, size, opacity, diagonal }),
   addHeaderFooter: (id: number, top: boolean, align: number, template: string) =>

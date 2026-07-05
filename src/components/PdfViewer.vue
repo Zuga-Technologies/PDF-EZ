@@ -211,6 +211,72 @@ watch(tool, (t) => {
   }
 });
 
+// ---- export & create ----
+const exportOpen = ref(false);
+const exportFormat = ref<"png" | "jpeg" | "txt">("png");
+const exportDpi = ref(150);
+
+async function runExport() {
+  if (!doc.value) return;
+  error.value = null;
+  try {
+    if (exportFormat.value === "txt") {
+      const target = await save({
+        title: "Export text",
+        defaultPath: title.value.replace(/\.pdf$/i, ".txt"),
+        filters: [{ name: "Text", extensions: ["txt"] }],
+      });
+      if (!target) return;
+      const pages = await api.exportText(doc.value.id, target);
+      status.value = `Text from ${pages} pages exported`;
+    } else {
+      const dir = await open({ title: "Export pages into folder", directory: true });
+      if (typeof dir !== "string") return;
+      busy.value = true;
+      const pages = await api.exportPages(
+        doc.value.id,
+        dir,
+        exportFormat.value === "jpeg",
+        exportDpi.value,
+      );
+      status.value = `${pages} pages exported as ${exportFormat.value.toUpperCase()} (${exportDpi.value} DPI)`;
+    }
+    exportOpen.value = false;
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function createFromImages() {
+  error.value = null;
+  const picked = await open({
+    title: "Choose images (one page each)",
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "bmp", "webp", "tiff"] }],
+    multiple: true,
+  });
+  const paths = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+  if (!paths.length) return;
+  const out = await save({
+    title: "Save new PDF as",
+    defaultPath: "images.pdf",
+    filters: [{ name: "PDF documents", extensions: ["pdf"] }],
+  });
+  if (!out) return;
+  if (!(await confirmDiscard())) return;
+  busy.value = true;
+  try {
+    await api.imagesToPdf(paths, out);
+    await loadDocument(out);
+    status.value = `Created ${title.value} from ${paths.length} image${paths.length > 1 ? "s" : ""}`;
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 // ---- protect (password) ----
 const protectOpen = ref(false);
 const protectPw = ref("");
@@ -1122,6 +1188,34 @@ onBeforeUnmount(() => {
       </form>
     </div>
 
+    <div v-if="exportOpen && doc" class="protect-modal" @pointerdown.self="exportOpen = false">
+      <div class="protect-card">
+        <h2>Export {{ title }}</h2>
+        <div class="stamp-row">
+          <select v-model="exportFormat">
+            <option value="png">Pages → PNG images</option>
+            <option value="jpeg">Pages → JPEG images</option>
+            <option value="txt">Document → plain text</option>
+          </select>
+          <select v-if="exportFormat !== 'txt'" v-model.number="exportDpi">
+            <option :value="96">96 DPI (screen)</option>
+            <option :value="150">150 DPI (sharp)</option>
+            <option :value="300">300 DPI (print)</option>
+          </select>
+        </div>
+        <p class="protect-hint">
+          {{ exportFormat === "txt"
+            ? "All page text is written to one .txt file."
+            : "One image per page, named after the document, into a folder you pick." }}
+        </p>
+        <div class="protect-actions">
+          <button type="button" @click="exportOpen = false">Cancel</button>
+          <span class="spacer"></span>
+          <button class="primary" :disabled="busy" @click="runExport">Export…</button>
+        </div>
+      </div>
+    </div>
+
     <div class="body">
       <aside v-if="toolsOpen" class="tools-panel">
         <p class="tools-title">All tools</p>
@@ -1146,7 +1240,13 @@ onBeforeUnmount(() => {
           <Icon name="type" /> Edit a PDF
           <span v-if="tool === 'edit'" class="tool-state">on</span>
         </button>
-        <p class="tools-soon">Coming: Export a PDF · Scan &amp; OCR · Redact · Sign</p>
+        <button class="tool-item" :disabled="!doc || busy" @click="exportOpen = true">
+          <Icon name="export" /> Export a PDF
+        </button>
+        <button class="tool-item" :disabled="busy" @click="createFromImages">
+          <Icon name="image" /> Create from images
+        </button>
+        <p class="tools-soon">Coming: Scan &amp; OCR · Redact · Sign</p>
       </aside>
 
       <aside v-if="doc && railOpen" ref="rail" class="rail">

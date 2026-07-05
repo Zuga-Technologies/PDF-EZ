@@ -30,6 +30,9 @@ const paths: Record<string, string> = {
     '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   type: '<polyline points="4 7 4 4 20 4 20 7"/><line x1="9" x2="15" y1="20" y2="20"/><line x1="12" x2="12" y1="4" y2="20"/>',
+  export: '<path d="M12 2v13"/><path d="m16 6-4-4-4 4"/><path d="M20 21H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3"/><path d="M17 7h3a2 2 0 0 1 2 2v10"/>',
+  image:
+    '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
   minus: '<path d="M5 12h14"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   "layout-grid":

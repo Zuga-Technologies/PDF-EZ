@@ -90,6 +90,34 @@ async fn save_document(
 }
 
 #[tauri::command]
+async fn export_pages(
+    app: tauri::AppHandle,
+    id: u32,
+    dir: String,
+    jpeg: bool,
+    dpi: u16,
+) -> Result<u16, String> {
+    engine_call(app, move |reply| PdfRequest::ExportPages { id, dir: PathBuf::from(dir), jpeg, dpi, reply })
+        .await
+}
+
+#[tauri::command]
+async fn export_text(app: tauri::AppHandle, id: u32, path: String) -> Result<u16, String> {
+    engine_call(app, move |reply| PdfRequest::ExportText { id, path: PathBuf::from(path), reply })
+        .await
+}
+
+#[tauri::command]
+async fn images_to_pdf(app: tauri::AppHandle, paths: Vec<String>, out: String) -> Result<(), String> {
+    engine_call(app, move |reply| PdfRequest::ImagesToPdf {
+        paths: paths.into_iter().map(PathBuf::from).collect(),
+        out: PathBuf::from(out),
+        reply,
+    })
+    .await
+}
+
+#[tauri::command]
 async fn add_watermark(
     app: tauri::AppHandle,
     id: u32,
@@ -299,6 +327,9 @@ pub fn run() {
             set_document_password,
             add_watermark,
             add_header_footer,
+            export_pages,
+            export_text,
+            images_to_pdf,
             compress_document,
             search_document,
             list_page_objects,

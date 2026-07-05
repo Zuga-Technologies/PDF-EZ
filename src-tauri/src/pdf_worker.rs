@@ -157,6 +157,26 @@ pub enum PdfRequest {
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
     },
+    /// Render every page to PNG/JPEG files in a directory.
+    ExportPages {
+        id: u32,
+        dir: PathBuf,
+        jpeg: bool,
+        dpi: u16,
+        reply: Sender<Result<u16, String>>,
+    },
+    /// Extract all text to a .txt file.
+    ExportText {
+        id: u32,
+        path: PathBuf,
+        reply: Sender<Result<u16, String>>,
+    },
+    /// Build a new PDF from image files (one page per image).
+    ImagesToPdf {
+        paths: Vec<PathBuf>,
+        out: PathBuf,
+        reply: Sender<Result<(), String>>,
+    },
     /// Diagonal or straight text watermark across every page.
     AddWatermark {
         id: u32,
@@ -400,6 +420,15 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path, qpdf.as_deref());
                         let _ = reply.send(result);
                     }
+                    PdfRequest::ExportPages { id, dir, jpeg, dpi, reply } => {
+                        let _ = reply.send(export_pages(&docs, id, &dir, jpeg, dpi));
+                    }
+                    PdfRequest::ExportText { id, path, reply } => {
+                        let _ = reply.send(export_text(&docs, id, &path));
+                    }
+                    PdfRequest::ImagesToPdf { paths, out, reply } => {
+                        let _ = reply.send(images_to_pdf(pdfium, &paths, &out));
+                    }
                     PdfRequest::AddWatermark { id, text, size, opacity, diagonal, reply } => {
                         let _ = reply.send(add_watermark(&mut docs, id, &text, size, opacity, diagonal));
                     }
@@ -475,6 +504,9 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SetDocumentPassword { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ExportPages { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ExportText { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ImagesToPdf { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddWatermark { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddHeaderFooter { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListPageObjects { reply, .. } => drop(reply.send(Err(e))),
@@ -816,6 +848,99 @@ fn save_doc(
 
     entry.path = target;
     Ok(make_info(id, entry))
+}
+
+// ---- export & create ----
+
+fn export_pages(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    dir: &std::path::Path,
+    jpeg: bool,
+    dpi: u16,
+) -> Result<u16, String> {
+    let entry = docs.get(&id).ok_or("Document is not open")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Could not create folder: {e}"))?;
+    let stem = entry
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".to_string());
+    let ext = if jpeg { "jpg" } else { "png" };
+    let dpi = dpi.clamp(36, 600) as f32;
+
+    let count = entry.doc.pages().len();
+    for (i, page) in entry.doc.pages().iter().enumerate() {
+        let width_px = (page.width().value * dpi / 72.0).round() as i32;
+        let config = PdfRenderConfig::new()
+            .set_target_width(width_px.clamp(64, 10_000))
+            .render_form_data(true)
+            .render_annotations(true);
+        let bitmap = page
+            .render_with_config(&config)
+            .map_err(|e| format!("Page {} render failed: {e}", i + 1))?;
+        let mut image = bitmap
+            .as_image()
+            .map_err(|e| format!("Page {} render failed: {e}", i + 1))?;
+        composite_highlights(&page, &mut image);
+        let out = dir.join(format!("{stem}-page-{:03}.{ext}", i + 1));
+        if jpeg {
+            image::DynamicImage::ImageRgb8(image.to_rgb8())
+                .save_with_format(&out, image::ImageFormat::Jpeg)
+        } else {
+            image.save_with_format(&out, image::ImageFormat::Png)
+        }
+        .map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+    }
+    Ok(count as u16)
+}
+
+fn export_text(docs: &HashMap<u32, OpenDoc>, id: u32, path: &std::path::Path) -> Result<u16, String> {
+    let entry = docs.get(&id).ok_or("Document is not open")?;
+    let mut out = String::new();
+    let count = entry.doc.pages().len();
+    for page in entry.doc.pages().iter() {
+        if let Ok(text) = page.text() {
+            out.push_str(&text.all());
+            out.push_str("\n\n");
+        }
+    }
+    std::fs::write(path, out).map_err(|e| format!("Could not write file: {e}"))?;
+    Ok(count as u16)
+}
+
+fn images_to_pdf(
+    pdfium: &'static Pdfium,
+    paths: &[PathBuf],
+    out: &std::path::Path,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("No images selected".to_string());
+    }
+    let mut doc = pdfium.create_new_pdf().map_err(|e| format!("Could not create PDF: {e}"))?;
+    for path in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let image = image::open(path).map_err(|e| format!("Could not read {name}: {e}"))?;
+        // Page sized so the image lands at ~96 dpi.
+        let (w_pts, h_pts) = (image.width() as f32 * 72.0 / 96.0, image.height() as f32 * 72.0 / 96.0);
+        let mut page = doc
+            .pages_mut()
+            .create_page_at_end(PdfPagePaperSize::Custom(
+                PdfPoints::new(w_pts),
+                PdfPoints::new(h_pts),
+            ))
+            .map_err(|e| format!("Could not add page for {name}: {e}"))?;
+        let mut object = PdfPageImageObject::new(&doc, &image)
+            .map_err(|e| format!("Could not embed {name}: {e}"))?;
+        object
+            .scale(w_pts, h_pts)
+            .map_err(|e| format!("Could not place {name}: {e}"))?;
+        page.objects_mut()
+            .add_image_object(object)
+            .map_err(|e| format!("Could not place {name}: {e}"))?;
+    }
+    doc.save_to_file(out).map_err(|e| format!("Could not save PDF: {e}"))?;
+    Ok(())
 }
 
 // ---- object-level editing (edit text & images) ----
@@ -1669,6 +1794,59 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Export: pages → images on disk, text → .txt, images → new PDF.
+    #[test]
+    fn export_and_create_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !fixture.exists() {
+            eprintln!("Alpha.pdf not generated — skipping");
+            return;
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, fixture, None).unwrap();
+
+        // Pages → PNG files.
+        let dir = std::env::temp_dir().join("zugapdf-test-export");
+        let _ = std::fs::remove_dir_all(&dir);
+        let count = export_pages(&docs, info.id, &dir, false, 96).unwrap();
+        assert_eq!(count, 3);
+        for i in 1..=3 {
+            let f = dir.join(format!("Alpha-page-{i:03}.png"));
+            assert!(std::fs::metadata(&f).map(|m| m.len() > 1000).unwrap_or(false), "{f:?}");
+        }
+
+        // Text export.
+        let txt = std::env::temp_dir().join("zugapdf-test-export.txt");
+        export_text(&docs, info.id, &txt).unwrap();
+        let content = std::fs::read_to_string(&txt).unwrap();
+        assert!(content.contains("Alpha.pdf - page 2"));
+
+        // Images → PDF: build a small PNG, convert, reopen.
+        let png = std::env::temp_dir().join("zugapdf-test-src.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            192,
+            96,
+            image::Rgb([200, 40, 40]),
+        ))
+        .save(&png)
+        .unwrap();
+        let out = std::env::temp_dir().join("zugapdf-test-frompix.pdf");
+        images_to_pdf(pdfium, &[png.clone(), png.clone()], &out).unwrap();
+        let created = open_doc(pdfium, &mut docs, &mut next_id, out.clone(), None).unwrap();
+        assert_eq!(created.page_count, 2);
+        assert_eq!(created.pages[0].width as i32, 144); // 192px @ 96dpi = 144pt
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(txt);
+        let _ = std::fs::remove_file(png);
+        let _ = std::fs::remove_file(out);
     }
 
     /// Object edit: rewrite a text object, delete one, persist through save.
