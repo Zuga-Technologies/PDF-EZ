@@ -10,8 +10,8 @@ const busy = ref(false);
 async function importLease() {
   error.value = null;
   const path = await open({
-    title: "Import ZugaPDF license",
-    filters: [{ name: "ZugaPDF license", extensions: ["lease"] }],
+    title: "Import PD-EZ license",
+    filters: [{ name: "PD-EZ license", extensions: ["lease"] }],
     multiple: false,
   });
   if (typeof path !== "string") return;
@@ -30,7 +30,7 @@ async function importLease() {
 <template>
   <div class="gate">
     <div class="card">
-      <p class="wordmark">Zuga<span>PDF</span></p>
+      <p class="wordmark">PD<span>-EZ</span></p>
       <h1>Pay once. Own it forever.</h1>
       <p class="pitch">
         A full PDF editor that runs entirely on your machine. No subscription,
@@ -39,7 +39,7 @@ async function importLease() {
       </p>
       <div class="actions">
         <button class="primary" disabled title="Checkout launches with v1.0">
-          Buy ZugaPDF — $4.99
+          Buy PD-EZ — $4.99
         </button>
         <button :disabled="busy" @click="importLease">Import license file…</button>
       </div>

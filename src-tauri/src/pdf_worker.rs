@@ -1019,12 +1019,12 @@ fn save_doc(
     let target = path.unwrap_or_else(|| entry.path.clone());
     let stamp = std::process::id();
 
-    let temp1 = std::env::temp_dir().join(format!("zugapdf-save-a-{stamp}-{id}.pdf"));
+    let temp1 = std::env::temp_dir().join(format!("pdez-save-a-{stamp}-{id}.pdf"));
     entry.doc.save_to_file(&temp1).map_err(|e| format!("Save failed: {e}"))?;
 
     let plain_bytes = if let Some(old) = &entry.doc_password {
         let qpdf = qpdf.ok_or("qpdf is not installed — cannot save an encrypted PDF")?;
-        let temp2 = std::env::temp_dir().join(format!("zugapdf-save-b-{stamp}-{id}.pdf"));
+        let temp2 = std::env::temp_dir().join(format!("pdez-save-b-{stamp}-{id}.pdf"));
         let result = run_qpdf(
             std::process::Command::new(qpdf)
                 .arg(format!("--password={old}"))
@@ -1051,7 +1051,7 @@ fn save_doc(
         }
         Some(pw) => {
             let qpdf = qpdf.ok_or("qpdf is not installed — cannot save with a password")?;
-            let temp3 = std::env::temp_dir().join(format!("zugapdf-save-c-{stamp}-{id}.pdf"));
+            let temp3 = std::env::temp_dir().join(format!("pdez-save-c-{stamp}-{id}.pdf"));
             std::fs::write(&temp3, &fixed).map_err(|e| format!("Save failed: {e}"))?;
             let result = run_qpdf(
                 std::process::Command::new(qpdf)
@@ -1112,8 +1112,8 @@ fn ocr_document(
             .map_err(|e| format!("Page {} render failed: {e}", i + 1))?;
         composite_highlights(&page, i as u16, &entry.session_highlights, &mut image);
 
-        let png = std::env::temp_dir().join(format!("zugapdf-ocr-{stamp}-{id}-{i}.png"));
-        let out_base = std::env::temp_dir().join(format!("zugapdf-ocr-{stamp}-{id}-{i}"));
+        let png = std::env::temp_dir().join(format!("pdez-ocr-{stamp}-{id}-{i}.png"));
+        let out_base = std::env::temp_dir().join(format!("pdez-ocr-{stamp}-{id}-{i}"));
         image
             .save_with_format(&png, image::ImageFormat::Png)
             .map_err(|e| format!("Page {} OCR prep failed: {e}", i + 1))?;
@@ -1693,8 +1693,8 @@ fn compress(
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
 
     let stamp = std::process::id();
-    let temp_in = std::env::temp_dir().join(format!("zugapdf-compress-in-{stamp}-{id}.pdf"));
-    let temp_out = std::env::temp_dir().join(format!("zugapdf-compress-out-{stamp}-{id}.pdf"));
+    let temp_in = std::env::temp_dir().join(format!("pdez-compress-in-{stamp}-{id}.pdf"));
+    let temp_out = std::env::temp_dir().join(format!("pdez-compress-out-{stamp}-{id}.pdf"));
 
     // Snapshot the CURRENT in-memory state (including unsaved edits).
     entry
@@ -2240,12 +2240,12 @@ fn snapshot_plain_bytes(
 ) -> Result<Vec<u8>, String> {
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
     let stamp = std::process::id();
-    let temp1 = std::env::temp_dir().join(format!("zugapdf-sign-a-{stamp}-{id}.pdf"));
+    let temp1 = std::env::temp_dir().join(format!("pdez-sign-a-{stamp}-{id}.pdf"));
     entry.doc.save_to_file(&temp1).map_err(|e| format!("Snapshot failed: {e}"))?;
 
     let plain = if let Some(old) = &entry.doc_password {
         let qpdf = qpdf.ok_or("qpdf is not installed — cannot sign an encrypted PDF")?;
-        let temp2 = std::env::temp_dir().join(format!("zugapdf-sign-b-{stamp}-{id}.pdf"));
+        let temp2 = std::env::temp_dir().join(format!("pdez-sign-b-{stamp}-{id}.pdf"));
         let result = run_qpdf(
             std::process::Command::new(qpdf)
                 .arg(format!("--password={old}"))
@@ -2329,7 +2329,7 @@ mod tests {
         let Some(pdfium) = test_pdfium() else { return };
 
         // Three pages with distinct heights so order is observable.
-        let tmp = std::env::temp_dir().join("zugapdf-test-organize.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-organize.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             for height in [500.0, 600.0, 700.0] {
@@ -2388,7 +2388,7 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap();
         let Some(pdfium) = test_pdfium() else { return };
 
-        let tmp = std::env::temp_dir().join("zugapdf-test-annots.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-annots.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
@@ -2408,9 +2408,9 @@ mod tests {
         assert_eq!(annots[0].left as i32, 100);
         assert_eq!(annots[0].top as i32, 720);
 
-        let annots = add_note(&mut docs, info.id, 0, 50.0, 650.0, "hello from zugapdf").unwrap();
+        let annots = add_note(&mut docs, info.id, 0, 50.0, 650.0, "hello from pdez").unwrap();
         assert_eq!(annots.len(), 2);
-        assert_eq!(annots[1].contents.as_deref(), Some("hello from zugapdf"));
+        assert_eq!(annots[1].contents.as_deref(), Some("hello from pdez"));
 
         let stroke = vec![(120.0, 500.0), (180.0, 540.0), (240.0, 500.0)];
         let annots = add_ink(&mut docs, info.id, 0, &[stroke], yellow, 2.0).unwrap();
@@ -2423,7 +2423,7 @@ mod tests {
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         let annots = list_annotations(&docs, reopened.id, 0).unwrap();
         assert_eq!(annots.len(), 3);
-        assert_eq!(annots[1].contents.as_deref(), Some("hello from zugapdf"));
+        assert_eq!(annots[1].contents.as_deref(), Some("hello from pdez"));
 
         // Delete the highlight; two remain.
         let annots = delete_annotation(&mut docs, reopened.id, 0, 0).unwrap();
@@ -2479,7 +2479,7 @@ mod tests {
 
         // Build a "scan": a page of normal-sized text rendered to an image,
         // wrapped in an image-only PDF (no text layer).
-        let src = std::env::temp_dir().join("zugapdf-test-scan-text.pdf");
+        let src = std::env::temp_dir().join("pdez-test-scan-text.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             let font = doc.fonts_mut().helvetica();
@@ -2502,14 +2502,14 @@ mod tests {
             doc.save_to_file(&src).unwrap();
         }
         let info = open_doc(pdfium, &mut docs, &mut next_id, src.clone(), None).unwrap();
-        let png = std::env::temp_dir().join("zugapdf-test-scan-src.png");
+        let png = std::env::temp_dir().join("pdez-test-scan-src.png");
         {
             let rendered = render_page(&docs, info.id, 0, 2480, false).unwrap(); // ~300dpi
             let b64 = rendered.data_url.split(',').nth(1).unwrap();
             let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
             std::fs::write(&png, bytes).unwrap();
         }
-        let scan = std::env::temp_dir().join("zugapdf-test-scan.pdf");
+        let scan = std::env::temp_dir().join("pdez-test-scan.pdf");
         images_to_pdf(pdfium, &[png.clone()], &scan).unwrap();
         let _ = std::fs::remove_file(src);
 
@@ -2546,7 +2546,7 @@ mod tests {
 
         let mut docs = HashMap::new();
         let mut next_id = 1;
-        let src = std::env::temp_dir().join("zugapdf-test-redact.pdf");
+        let src = std::env::temp_dir().join("pdez-test-redact.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             let font = doc.fonts_mut().helvetica();
@@ -2631,7 +2631,7 @@ mod tests {
         let mut docs = HashMap::new();
         let mut next_id = 1;
         let info = open_doc(pdfium, &mut docs, &mut next_id, fixture, None).unwrap();
-        let out = std::env::temp_dir().join("zugapdf-engine-signed.pdf");
+        let out = std::env::temp_dir().join("pdez-engine-signed.pdf");
         let qpdf = find_qpdf(None);
         let signed = sign_document(
             pdfium, &mut docs, info.id, pfx, "test", "Approved", "Buga", "", out.clone(),
@@ -2667,7 +2667,7 @@ mod tests {
         let info = open_doc(pdfium, &mut docs, &mut next_id, fixture, None).unwrap();
 
         // Pages → PNG files.
-        let dir = std::env::temp_dir().join("zugapdf-test-export");
+        let dir = std::env::temp_dir().join("pdez-test-export");
         let _ = std::fs::remove_dir_all(&dir);
         let count = export_pages(&docs, info.id, &dir, false, 96).unwrap();
         assert_eq!(count, 3);
@@ -2677,13 +2677,13 @@ mod tests {
         }
 
         // Text export.
-        let txt = std::env::temp_dir().join("zugapdf-test-export.txt");
+        let txt = std::env::temp_dir().join("pdez-test-export.txt");
         export_text(&docs, info.id, &txt).unwrap();
         let content = std::fs::read_to_string(&txt).unwrap();
         assert!(content.contains("Alpha.pdf - page 2"));
 
         // Images → PDF: build a small PNG, convert, reopen.
-        let png = std::env::temp_dir().join("zugapdf-test-src.png");
+        let png = std::env::temp_dir().join("pdez-test-src.png");
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             192,
             96,
@@ -2691,7 +2691,7 @@ mod tests {
         ))
         .save(&png)
         .unwrap();
-        let out = std::env::temp_dir().join("zugapdf-test-frompix.pdf");
+        let out = std::env::temp_dir().join("pdez-test-frompix.pdf");
         images_to_pdf(pdfium, &[png.clone(), png.clone()], &out).unwrap();
         let created = open_doc(pdfium, &mut docs, &mut next_id, out.clone(), None).unwrap();
         assert_eq!(created.page_count, 2);
@@ -2714,7 +2714,7 @@ mod tests {
             eprintln!("Alpha.pdf not generated — skipping");
             return;
         }
-        let tmp = std::env::temp_dir().join("zugapdf-test-edit.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-edit.pdf");
         std::fs::copy(&fixture, &tmp).unwrap();
 
         let mut docs = HashMap::new();
@@ -2757,7 +2757,7 @@ mod tests {
             eprintln!("Alpha.pdf not generated — skipping");
             return;
         }
-        let tmp = std::env::temp_dir().join("zugapdf-test-stamp.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-stamp.pdf");
         std::fs::copy(&fixture, &tmp).unwrap();
 
         let mut docs = HashMap::new();
@@ -2793,7 +2793,7 @@ mod tests {
             return;
         };
 
-        let tmp = std::env::temp_dir().join("zugapdf-test-password.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-password.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
@@ -2843,7 +2843,7 @@ mod tests {
             return;
         }
         // Work on a copy so the fixture stays pristine.
-        let tmp = std::env::temp_dir().join("zugapdf-test-form.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-form.pdf");
         std::fs::copy(&fixture, &tmp).unwrap();
 
         let mut docs = HashMap::new();
@@ -2918,7 +2918,7 @@ mod tests {
             return;
         };
 
-        let tmp = std::env::temp_dir().join("zugapdf-test-compress.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-compress.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             for _ in 0..4 {
@@ -2948,8 +2948,8 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap();
         let Some(pdfium) = test_pdfium() else { return };
 
-        let base = std::env::temp_dir().join("zugapdf-test-merge-base.pdf");
-        let extra = std::env::temp_dir().join("zugapdf-test-merge-extra.pdf");
+        let base = std::env::temp_dir().join("pdez-test-merge-base.pdf");
+        let extra = std::env::temp_dir().join("pdez-test-merge-extra.pdf");
         for (path, pages, height) in [(&base, 2, 700.0), (&extra, 3, 500.0)] {
             let mut doc = pdfium.create_new_pdf().unwrap();
             for _ in 0..pages {
@@ -2989,7 +2989,7 @@ mod tests {
         let Some(pdfium) = test_pdfium() else { return };
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
-        let out = std::env::temp_dir().join("zugapdf-ap-sample.pdf");
+        let out = std::env::temp_dir().join("pdez-ap-sample.pdf");
         std::fs::copy(&fixture, &out).unwrap();
 
         let mut docs = HashMap::new();
@@ -3027,7 +3027,7 @@ mod tests {
         if !fixture.exists() {
             return;
         }
-        let tmp = std::env::temp_dir().join("zugapdf-test-rot-hl.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-rot-hl.pdf");
         std::fs::copy(&fixture, &tmp).unwrap();
 
         let mut docs = HashMap::new();
@@ -3071,7 +3071,7 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap();
         let Some(pdfium) = test_pdfium() else { return };
 
-        let tmp = std::env::temp_dir().join("zugapdf-test-ap.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-ap.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
@@ -3137,7 +3137,7 @@ mod tests {
         let _guard = ENGINE_LOCK.lock().unwrap();
         let Some(pdfium) = test_pdfium() else { return };
 
-        let tmp = std::env::temp_dir().join("zugapdf-test-hl-render.pdf");
+        let tmp = std::env::temp_dir().join("pdez-test-hl-render.pdf");
         {
             let mut doc = pdfium.create_new_pdf().unwrap();
             doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();

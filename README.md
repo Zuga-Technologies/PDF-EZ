@@ -1,4 +1,4 @@
-# ZugaPDF
+# PD-EZ
 
 ![status](https://img.shields.io/badge/status-V1_IN_PROGRESS-blue)
 **Brand accent:** fountain-pen blue `#2b4acb` / `#7d95f2`
@@ -51,7 +51,7 @@ production signing key never ships; only `keys/license.pub` is embedded.
 
 ## Related
 
-- Capability audit + tier plan: ZugaPDF scope-lock artifact (2026-07-05).
+- Capability audit + tier plan: PD-EZ scope-lock artifact (2026-07-05).
 - Monorepo host: `E:\Programming` (this is an embedded studio repo).
 
 ## License

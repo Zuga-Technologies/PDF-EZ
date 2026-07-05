@@ -417,5 +417,5 @@ pub fn run() {
             activate_license_file
         ])
         .run(tauri::generate_context!())
-        .expect("error while running ZugaPDF");
+        .expect("error while running PD-EZ");
 }

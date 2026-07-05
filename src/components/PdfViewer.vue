@@ -813,7 +813,7 @@ function applyInfo(info: DocInfo) {
 async function confirmDiscard(): Promise<boolean> {
   if (!dirty.value) return true;
   return confirm("You have unsaved changes. Discard them?", {
-    title: "ZugaPDF",
+    title: "PD-EZ",
     kind: "warning",
   });
 }
@@ -903,7 +903,7 @@ async function deleteSelection() {
   const indices = selectionList.value;
   if (!indices.length || !doc.value) return;
   const noun = indices.length === 1 ? `page ${indices[0] + 1}` : `${indices.length} pages`;
-  if (!(await confirm(`Delete ${noun}?`, { title: "ZugaPDF", kind: "warning" }))) return;
+  if (!(await confirm(`Delete ${noun}?`, { title: "PD-EZ", kind: "warning" }))) return;
   void mutate(() => api.deletePages(doc.value!.id, indices));
 }
 
@@ -1346,7 +1346,7 @@ onBeforeUnmount(() => {
       <div class="protect-card scan-card">
         <h2>Network &amp; privacy</h2>
         <p class="protect-hint">
-          ZugaPDF runs entirely on this machine. Nothing you open, edit, or save
+          PD-EZ runs entirely on this machine. Nothing you open, edit, or save
           is ever uploaded. The only features that can touch the network are the
           two below — both off unless you turn them on here.
         </p>

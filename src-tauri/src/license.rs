@@ -59,7 +59,7 @@ fn verifying_key() -> Result<VerifyingKey, String> {
 }
 
 pub fn verify_lease(lease: &Lease) -> Result<(), String> {
-    if lease.product != "zugapdf" {
+    if lease.product != "pdez" {
         return Err("lease is for a different product".to_string());
     }
     let key = verifying_key()?;
@@ -125,7 +125,7 @@ mod tests {
         let signing = SigningKey::from_bytes(&seed);
         let mut lease = Lease {
             v: 1,
-            product: "zugapdf".into(),
+            product: "pdez".into(),
             email: email.into(),
             order_id: order_id.into(),
             issued_at: "2026-07-05T00:00:00Z".into(),
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn wrong_product_fails() {
         let Some(mut lease) = dev_signed_lease("buyer@example.com", "ord-1") else { return };
-        lease.product = "zugapdf-pro".into();
+        lease.product = "pdez-pro".into();
         assert!(verify_lease(&lease).is_err());
     }
 
@@ -169,7 +169,7 @@ mod tests {
 pub fn activate_from_file(app_data_dir: &Path, lease_file: &Path) -> Result<LicenseStatus, String> {
     let raw = fs::read_to_string(lease_file).map_err(|e| format!("could not read file: {e}"))?;
     let lease: Lease =
-        serde_json::from_str(&raw).map_err(|_| "not a valid ZugaPDF license file".to_string())?;
+        serde_json::from_str(&raw).map_err(|_| "not a valid PD-EZ license file".to_string())?;
     verify_lease(&lease)?;
     fs::create_dir_all(app_data_dir).map_err(|e| format!("could not store license: {e}"))?;
     fs::write(lease_path(app_data_dir), &raw).map_err(|e| format!("could not store license: {e}"))?;

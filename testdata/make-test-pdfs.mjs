@@ -1,4 +1,4 @@
-// Dependency-free generator for ZugaPDF test fixtures.
+// Dependency-free generator for PD-EZ test fixtures.
 // Each file: big page labels (A1, A2...), a colored banner, and the filename,
 // so merge order and page identity are obvious at a glance.
 import { writeFileSync } from "node:fs";

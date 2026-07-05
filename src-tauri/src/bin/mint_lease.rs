@@ -3,7 +3,7 @@
 //!
 //!   cargo run --features dev-tools --bin mint_lease -- buyer@example.com [order_id]
 //!
-//! Writes zugapdf-<order_id>.lease next to the cwd; import it via the app's
+//! Writes pdez-<order_id>.lease next to the cwd; import it via the app's
 //! activation screen. The same signing logic moves server-side (Polar.sh
 //! webhook handler) for production.
 
@@ -28,19 +28,19 @@ fn main() {
     let signing = SigningKey::from_bytes(&seed);
 
     let issued_at = chrono_free_now();
-    let payload = format!("zugapdf.v1|{email}|{order_id}|{issued_at}");
+    let payload = format!("pdez.v1|{email}|{order_id}|{issued_at}");
     let sig = base64::engine::general_purpose::STANDARD.encode(signing.sign(payload.as_bytes()).to_bytes());
 
     let lease = serde_json::json!({
         "v": 1,
-        "product": "zugapdf",
+        "product": "pdez",
         "email": email,
         "order_id": order_id,
         "issued_at": issued_at,
         "sig": sig,
     });
 
-    let out = format!("zugapdf-{order_id}.lease");
+    let out = format!("pdez-{order_id}.lease");
     std::fs::write(&out, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
     println!("minted {out}");
 }

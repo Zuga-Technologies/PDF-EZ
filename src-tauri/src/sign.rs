@@ -356,7 +356,7 @@ mod tests {
         let key = RsaPrivateKey::new(&mut rng, 1024).unwrap(); // small = fast test
         let signer = SigningKey::<Sha256>::new(key.clone());
         let spki = SubjectPublicKeyInfoOwned::from_key(key.to_public_key()).unwrap();
-        let subject = Name::from_str("CN=ZugaPDF Test Root").unwrap();
+        let subject = Name::from_str("CN=PD-EZ Test Root").unwrap();
         let validity = Validity::from_now(std::time::Duration::from_secs(3650 * 86_400)).unwrap();
         let builder = CertificateBuilder::new(
             Profile::Root,
@@ -452,7 +452,7 @@ mod tests {
         let pfx = make_test_pfx("zuga");
         let params = SignParams {
             reason: "Approved".to_string(),
-            name: "ZugaPDF".to_string(),
+            name: "PD-EZ".to_string(),
             location: "".to_string(),
         };
         let signed = sign_pdf(minimal_pdf(), &pfx, "zuga", &params).unwrap();
