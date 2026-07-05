@@ -910,7 +910,16 @@ onBeforeUnmount(() => {
                 :class="{ done: f.kind === 'Text' ? f.value.length > 0 : f.checked }"
                 :style="fieldCss(f)"
                 :title="f.name || f.kind"
-              ></div>
+              >
+                <svg
+                  v-if="f.checked && f.kind !== 'Text'"
+                  class="checkmark"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <path d="M4 13 L10 19 L20 6" />
+                </svg>
+              </div>
             </template>
 
             <input
@@ -1155,6 +1164,20 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .field-tint.done { background: rgba(80, 200, 130, 0.12); outline-color: rgba(80, 200, 130, 0.5); }
+.field-tint .checkmark {
+  width: 100%;
+  height: 100%;
+  display: block;
+  padding: 8%;
+  box-sizing: border-box;
+}
+.field-tint .checkmark path {
+  fill: none;
+  stroke: #14652f;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .field-editor {
   position: absolute;
   z-index: 6;
