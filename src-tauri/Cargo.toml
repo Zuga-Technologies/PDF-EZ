@@ -1,0 +1,37 @@
+[package]
+name = "zugapdf"
+version = "0.1.0"
+description = "ZugaPDF — offline PDF editor. Pay once, own it forever."
+authors = ["Zuga Technologies"]
+edition = "2021"
+default-run = "zugapdf"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "zugapdf_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "mint_lease"
+path = "src/bin/mint_lease.rs"
+required-features = ["dev-tools"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pdfium-render = "0.9.2"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+base64 = "0.22.1"
+rand = { version = "0.10.2", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+tauri-plugin-dialog = "2.7.1"
+
+[features]
+dev-tools = ["dep:rand"]
