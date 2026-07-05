@@ -31,6 +31,13 @@ pub struct DocInfo {
 }
 
 #[derive(Serialize, Clone)]
+pub struct CompressOutcome {
+    pub info: DocInfo,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+}
+
+#[derive(Serialize, Clone)]
 pub struct AnnotInfo {
     pub page: u16,
     pub index: u16,
@@ -106,6 +113,13 @@ pub enum PdfRequest {
         id: u32,
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
+    },
+    /// Structural compression via the bundled qpdf CLI (object streams,
+    /// stream recompression). Result replaces the in-memory document;
+    /// the user still saves to persist.
+    Compress {
+        id: u32,
+        reply: Sender<Result<CompressOutcome, String>>,
     },
     /// Append every page of each file (in order) to the end of the document.
     MergeAppend {
@@ -201,12 +215,25 @@ fn bind_pdfium(resource_dir: Option<PathBuf>) -> Result<Pdfium, String> {
         .map_err(|e| format!("Could not load pdfium library: {e}"))
 }
 
+/// Locate the bundled qpdf.exe: resource dir in production, repo copy in dev.
+fn find_qpdf(resource_dir: Option<&PathBuf>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(res) = resource_dir {
+        candidates.push(res.join("qpdf").join("bin").join("qpdf.exe"));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("qpdf").join("bin").join("qpdf.exe"),
+    );
+    candidates.into_iter().find(|p| p.exists())
+}
+
 pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
     let (tx, rx) = channel::<PdfRequest>();
 
     std::thread::Builder::new()
         .name("pdf-engine".into())
         .spawn(move || {
+            let qpdf = find_qpdf(resource_dir.as_ref());
             let pdfium: &'static Pdfium = match bind_pdfium(resource_dir) {
                 // Leak once: the engine lives for the whole app lifetime, and a
                 // 'static borrow lets us keep PdfDocument handles in the map.
@@ -260,6 +287,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path);
                         let _ = reply.send(result);
                     }
+                    PdfRequest::Compress { id, reply } => {
+                        let _ = reply.send(compress(pdfium, &mut docs, id, qpdf.as_deref()));
+                    }
                     PdfRequest::MergeAppend { id, paths, reply } => {
                         let _ = reply.send(merge_append(pdfium, &mut docs, id, &paths));
                     }
@@ -297,6 +327,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::Compress { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::MergeAppend { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListAnnotations { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddHighlight { reply, .. } => drop(reply.send(Err(e))),
@@ -591,6 +622,60 @@ fn save_doc(
         .map_err(|e| format!("Save failed: {e}"))?;
     entry.path = target;
     Ok(make_info(id, entry))
+}
+
+fn compress(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    qpdf: Option<&std::path::Path>,
+) -> Result<CompressOutcome, String> {
+    let qpdf = qpdf.ok_or("qpdf is not installed with this build")?;
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+
+    let stamp = std::process::id();
+    let temp_in = std::env::temp_dir().join(format!("zugapdf-compress-in-{stamp}-{id}.pdf"));
+    let temp_out = std::env::temp_dir().join(format!("zugapdf-compress-out-{stamp}-{id}.pdf"));
+
+    // Snapshot the CURRENT in-memory state (including unsaved edits).
+    entry
+        .doc
+        .save_to_file(&temp_in)
+        .map_err(|e| format!("Compress failed while snapshotting: {e}"))?;
+    let bytes_before = std::fs::metadata(&temp_in).map_err(|e| e.to_string())?.len();
+
+    let mut cmd = std::process::Command::new(qpdf);
+    cmd.arg("--object-streams=generate")
+        .arg("--compress-streams=y")
+        .arg("--recompress-flate")
+        .arg("--compression-level=9")
+        .arg(&temp_in)
+        .arg(&temp_out);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output().map_err(|e| format!("Could not run qpdf: {e}"))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&temp_in);
+        let _ = std::fs::remove_file(&temp_out);
+        return Err(format!(
+            "Compression failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let compressed = std::fs::read(&temp_out).map_err(|e| format!("Compress failed: {e}"))?;
+    let bytes_after = compressed.len() as u64;
+    let new_doc = pdfium
+        .load_pdf_from_byte_vec(compressed, None)
+        .map_err(|e| format!("Compressed output failed to reopen: {e}"))?;
+    entry.doc = new_doc;
+
+    let _ = std::fs::remove_file(&temp_in);
+    let _ = std::fs::remove_file(&temp_out);
+    Ok(CompressOutcome { info: make_info(id, entry), bytes_before, bytes_after })
 }
 
 fn merge_append(
@@ -979,6 +1064,41 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Compression round-trips through qpdf and the result opens with the
+    /// same page count.
+    #[test]
+    fn compress_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let Some(qpdf) = find_qpdf(None) else {
+            eprintln!("qpdf not fetched — skipping");
+            return;
+        };
+
+        let tmp = std::env::temp_dir().join("zugapdf-test-compress.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            for _ in 0..4 {
+                doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            }
+            doc.save_to_file(&tmp).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let outcome = compress(pdfium, &mut docs, info.id, Some(&qpdf)).unwrap();
+        assert_eq!(outcome.info.page_count, 4);
+        assert!(outcome.bytes_before > 0 && outcome.bytes_after > 0);
+
+        // The compressed doc replaced the in-memory one; it must still save.
+        save_doc(&mut docs, info.id, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        assert_eq!(reopened.page_count, 4);
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// Merging appends the other file's pages and survives save → reopen.

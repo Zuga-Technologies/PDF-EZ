@@ -63,6 +63,10 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  compressDocument: (id: number) =>
+    invoke<{ info: DocInfo; bytes_before: number; bytes_after: number }>("compress_document", {
+      id,
+    }),
   listAnnotations: (id: number, page: number) =>
     invoke<AnnotInfo[]>("list_annotations", { id, page }),
   addHighlight: (

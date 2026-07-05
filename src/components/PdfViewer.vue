@@ -16,6 +16,7 @@ const selected = ref<Set<number>>(new Set());
 const dirty = ref(false);
 const busy = ref(false);
 const error = ref<string | null>(null);
+const status = ref<string | null>(null);
 const zoom = ref(1.0);
 const needsPassword = ref(false);
 const password = ref("");
@@ -226,6 +227,7 @@ async function openFile() {
 
 async function loadDocument(path: string, pw?: string) {
   error.value = null;
+  status.value = null;
   needsPassword.value = false;
   try {
     if (doc.value) {
@@ -270,6 +272,7 @@ async function mutate(op: () => Promise<DocInfo>) {
   if (!doc.value || busy.value) return;
   busy.value = true;
   error.value = null;
+  status.value = null;
   try {
     const info = await op();
     applyInfo(info);
@@ -494,6 +497,35 @@ async function refreshPage(index: number) {
 
 // ---- save ----
 
+function fmtBytes(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)} KB`;
+  return `${n} B`;
+}
+
+async function compressDoc() {
+  if (!doc.value || busy.value) return;
+  busy.value = true;
+  error.value = null;
+  status.value = "Compressing…";
+  try {
+    const result = await api.compressDocument(doc.value.id);
+    applyInfo(result.info);
+    dirty.value = true;
+    const saved = result.bytes_before - result.bytes_after;
+    const pct = result.bytes_before ? Math.round((saved / result.bytes_before) * 100) : 0;
+    status.value =
+      saved > 0
+        ? `${fmtBytes(result.bytes_before)} → ${fmtBytes(result.bytes_after)} (−${pct}%) — Save to keep it`
+        : `Already tight: ${fmtBytes(result.bytes_before)} → ${fmtBytes(result.bytes_after)}`;
+  } catch (e) {
+    status.value = null;
+    error.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 async function mergeFiles() {
   if (!doc.value || busy.value) return;
   const picked = await open({
@@ -592,6 +624,9 @@ onBeforeUnmount(() => {
         <button :disabled="busy" title="Append pages from other PDFs" @click="mergeFiles">
           Merge…
         </button>
+        <button :disabled="busy" title="Shrink file size (structure + streams)" @click="compressDoc">
+          Compress
+        </button>
         <span class="divider"></span>
         <button
           :disabled="!selected.size || busy"
@@ -670,6 +705,7 @@ onBeforeUnmount(() => {
 
         <template v-else>
           <p v-if="error" class="error inline-error">{{ error }}</p>
+          <p v-if="status" class="status inline-error">{{ status }}</p>
           <div
             v-for="(page, index) in pages"
             :key="index"
@@ -964,5 +1000,6 @@ button.active {
 .brand span { color: var(--accent); }
 .empty p:last-child { font-size: 0.9rem; }
 .error { color: var(--danger); }
+.status { color: var(--ok); }
 .inline-error { margin: 0; font-size: 0.85rem; }
 </style>

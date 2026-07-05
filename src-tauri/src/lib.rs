@@ -4,7 +4,7 @@ mod pdf_worker;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
-use pdf_worker::{AnnotInfo, DocInfo, PdfRequest, PdfWorkerHandle, RenderedPage, Rgba};
+use pdf_worker::{AnnotInfo, CompressOutcome, DocInfo, PdfRequest, PdfWorkerHandle, RenderedPage, Rgba};
 use tauri::Manager;
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -84,6 +84,11 @@ async fn save_document(
     path: Option<String>,
 ) -> Result<DocInfo, String> {
     engine_call(app, move |reply| PdfRequest::Save { id, path: path.map(PathBuf::from), reply }).await
+}
+
+#[tauri::command]
+async fn compress_document(app: tauri::AppHandle, id: u32) -> Result<CompressOutcome, String> {
+    engine_call(app, move |reply| PdfRequest::Compress { id, reply }).await
 }
 
 #[tauri::command]
@@ -193,6 +198,7 @@ pub fn run() {
             delete_pages,
             reorder_pages,
             save_document,
+            compress_document,
             merge_append,
             list_annotations,
             add_highlight,
