@@ -11,6 +11,7 @@ export interface DocInfo {
   pages: PageDims[];
   title: string | null;
   path: string;
+  has_password: boolean;
 }
 
 export interface RenderedPage {
@@ -85,6 +86,8 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  setDocumentPassword: (id: number, password: string | null) =>
+    invoke<DocInfo>("set_document_password", { id, password }),
   listFormFields: (id: number, page: number) =>
     invoke<FieldInfo[]>("list_form_fields", { id, page }),
   setFormField: (id: number, page: number, index: number, value: string) =>

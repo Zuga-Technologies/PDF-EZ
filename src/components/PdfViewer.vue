@@ -62,6 +62,46 @@ const drag = ref<DragState | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
 
+// ---- protect (password) ----
+const protectOpen = ref(false);
+const protectPw = ref("");
+const protectPw2 = ref("");
+const protectError = ref<string | null>(null);
+
+async function applyProtect() {
+  if (!doc.value) return;
+  protectError.value = null;
+  if (protectPw.value.length < 4) {
+    protectError.value = "Password must be at least 4 characters.";
+    return;
+  }
+  if (protectPw.value !== protectPw2.value) {
+    protectError.value = "Passwords don't match.";
+    return;
+  }
+  try {
+    doc.value = await api.setDocumentPassword(doc.value.id, protectPw.value);
+    dirty.value = true;
+    protectOpen.value = false;
+    protectPw.value = protectPw2.value = "";
+    status.value = "Password set — Save to encrypt the file (AES-256)";
+  } catch (e) {
+    protectError.value = String(e);
+  }
+}
+
+async function removeProtect() {
+  if (!doc.value) return;
+  try {
+    doc.value = await api.setDocumentPassword(doc.value.id, null);
+    dirty.value = true;
+    protectOpen.value = false;
+    status.value = "Password removed — Save to write the unencrypted file";
+  } catch (e) {
+    protectError.value = String(e);
+  }
+}
+
 // ---- form fill ----
 const fieldsByPage = ref<Map<number, FieldInfo[]>>(new Map());
 const fieldEditor = ref<{
@@ -825,6 +865,12 @@ onBeforeUnmount(() => {
         <button :disabled="busy" title="Shrink file size (structure + streams)" @click="compressDoc">
           Compress
         </button>
+        <button
+          :class="{ active: doc.has_password }"
+          :disabled="busy"
+          :title="doc.has_password ? 'Saves are encrypted (AES-256) — click to change/remove' : 'Password-protect this PDF'"
+          @click="((protectOpen = !protectOpen), (protectError = null))"
+        >{{ doc.has_password ? "🔒 Protected" : "Protect…" }}</button>
         <span class="divider"></span>
         <button
           :disabled="!selected.size || busy"
@@ -874,6 +920,27 @@ onBeforeUnmount(() => {
         <button aria-label="Zoom in" @click="zoomIn">+</button>
       </template>
     </header>
+
+    <div v-if="protectOpen && doc" class="protect-modal" @pointerdown.self="protectOpen = false">
+      <form class="protect-card" @submit.prevent="applyProtect">
+        <h2>{{ doc.has_password ? "Change or remove password" : "Password-protect this PDF" }}</h2>
+        <p class="protect-hint">
+          The file is encrypted with AES-256 when you save. Anyone opening it will need this
+          password — there is no recovery if it's lost.
+        </p>
+        <input v-model="protectPw" v-focus type="password" placeholder="Password" />
+        <input v-model="protectPw2" type="password" placeholder="Repeat password" />
+        <p v-if="protectError" class="error">{{ protectError }}</p>
+        <div class="protect-actions">
+          <button v-if="doc.has_password" type="button" class="danger" @click="removeProtect">
+            Remove password
+          </button>
+          <span class="spacer"></span>
+          <button type="button" @click="protectOpen = false">Cancel</button>
+          <button class="primary" type="submit">Set password</button>
+        </div>
+      </form>
+    </div>
 
     <div class="body">
       <aside v-if="doc" ref="rail" class="rail">
@@ -1204,6 +1271,37 @@ onBeforeUnmount(() => {
   padding: 0.3rem 0.6rem;
 }
 .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.protect-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(10, 13, 20, 0.6);
+  display: grid;
+  place-items: center;
+}
+.protect-card {
+  background: var(--chrome);
+  border: 1px solid var(--chrome-line);
+  border-radius: 10px;
+  padding: 1.5rem 1.75rem;
+  width: 24rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.protect-card h2 { font-size: 1.05rem; margin: 0; font-family: var(--sans); }
+.protect-hint { color: var(--text-dim); font-size: 0.82rem; margin: 0 0 0.4rem; }
+.protect-card input {
+  font: inherit;
+  background: var(--chrome-raised);
+  color: var(--text);
+  border: 1px solid var(--chrome-line);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+}
+.protect-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
+.protect-actions .spacer { flex: 1; }
+button.danger { color: var(--danger); }
 .field-tint {
   position: absolute;
   background: rgba(80, 130, 240, 0.16);

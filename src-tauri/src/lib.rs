@@ -90,6 +90,15 @@ async fn save_document(
 }
 
 #[tauri::command]
+async fn set_document_password(
+    app: tauri::AppHandle,
+    id: u32,
+    password: Option<String>,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::SetDocumentPassword { id, password, reply }).await
+}
+
+#[tauri::command]
 async fn list_form_fields(
     app: tauri::AppHandle,
     id: u32,
@@ -232,6 +241,7 @@ pub fn run() {
             delete_pages,
             reorder_pages,
             save_document,
+            set_document_password,
             compress_document,
             search_document,
             list_form_fields,

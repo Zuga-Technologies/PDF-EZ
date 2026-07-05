@@ -14,20 +14,22 @@ use base64::Engine as _;
 use pdfium_render::prelude::*;
 use serde::Serialize;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct PageDims {
     /// PDF points (1/72 in)
     pub width: f32,
     pub height: f32,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct DocInfo {
     pub id: u32,
     pub page_count: u16,
     pub pages: Vec<PageDims>,
     pub title: Option<String>,
     pub path: String,
+    /// True when saves will be AES-256 encrypted with the stored password.
+    pub has_password: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -141,6 +143,12 @@ pub enum PdfRequest {
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
     },
+    /// Set (Some) or remove (None) the password applied at save time.
+    SetDocumentPassword {
+        id: u32,
+        password: Option<String>,
+        reply: Sender<Result<DocInfo, String>>,
+    },
     ListFormFields {
         id: u32,
         page: u16,
@@ -218,6 +226,13 @@ pub enum PdfRequest {
 struct OpenDoc {
     doc: PdfDocument<'static>,
     path: PathBuf,
+    /// Password the in-memory document was loaded with. PDFium KEEPS that
+    /// encryption in every snapshot it saves, so qpdf needs this to read
+    /// snapshots. Fixed for the lifetime of the load.
+    doc_password: Option<String>,
+    /// Password the user wants on saved files (Protect dialog). None =
+    /// save unencrypted (decrypting the snapshot if needed).
+    save_password: Option<String>,
 }
 
 pub struct PdfWorkerHandle {
@@ -331,7 +346,17 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let _ = reply.send(result);
                     }
                     PdfRequest::Save { id, path, reply } => {
-                        let result = save_doc(&mut docs, id, path);
+                        let result = save_doc(&mut docs, id, path, qpdf.as_deref());
+                        let _ = reply.send(result);
+                    }
+                    PdfRequest::SetDocumentPassword { id, password, reply } => {
+                        let result = docs
+                            .get_mut(&id)
+                            .ok_or("Document is not open".to_string())
+                            .map(|entry| {
+                                entry.save_password = password.filter(|p| !p.is_empty());
+                                make_info(id, entry)
+                            });
                         let _ = reply.send(result);
                     }
                     PdfRequest::ListFormFields { id, page, reply } => {
@@ -383,6 +408,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::SetDocumentPassword { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListFormFields { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SetFormField { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SearchDocument { reply, .. } => drop(reply.send(Err(e))),
@@ -424,6 +450,7 @@ fn make_info(id: u32, entry: &OpenDoc) -> DocInfo {
         pages,
         title,
         path: entry.path.to_string_lossy().into_owned(),
+        has_password: entry.save_password.is_some(),
     }
 }
 
@@ -441,7 +468,8 @@ fn open_doc(
 
     let id = *next_id;
     *next_id += 1;
-    let entry = OpenDoc { doc, path };
+    let password = password.filter(|p| !p.is_empty());
+    let entry = OpenDoc { doc, path, doc_password: password.clone(), save_password: password };
     let info = make_info(id, &entry);
     docs.insert(id, entry);
     Ok(info)
@@ -672,13 +700,49 @@ fn save_doc(
     docs: &mut HashMap<u32, OpenDoc>,
     id: u32,
     path: Option<PathBuf>,
+    qpdf: Option<&std::path::Path>,
 ) -> Result<DocInfo, String> {
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
     let target = path.unwrap_or_else(|| entry.path.clone());
-    entry
-        .doc
-        .save_to_file(&target)
-        .map_err(|e| format!("Save failed: {e}"))?;
+
+    // PDFium snapshots keep the encryption the doc was LOADED with, so any
+    // difference between doc_password and save_password routes through qpdf.
+    if entry.doc_password == entry.save_password && entry.save_password.is_none() {
+        entry.doc.save_to_file(&target).map_err(|e| format!("Save failed: {e}"))?;
+    } else {
+        let qpdf = qpdf.ok_or("qpdf is not installed — cannot change PDF encryption")?;
+        let temp =
+            std::env::temp_dir().join(format!("zugapdf-enc-{}-{id}.pdf", std::process::id()));
+        entry.doc.save_to_file(&temp).map_err(|e| format!("Save failed: {e}"))?;
+
+        let mut cmd = std::process::Command::new(qpdf);
+        if let Some(old) = &entry.doc_password {
+            cmd.arg(format!("--password={old}"));
+        }
+        match &entry.save_password {
+            Some(pw) => {
+                cmd.arg("--encrypt").arg(pw).arg(pw).arg("256").arg("--");
+            }
+            None => {
+                cmd.arg("--decrypt");
+            }
+        }
+        cmd.arg(&temp).arg(&target);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let output = cmd.output().map_err(|e| format!("Could not run qpdf: {e}"))?;
+        let _ = std::fs::remove_file(&temp);
+        if !output.status.success() {
+            return Err(format!(
+                "Could not update encryption: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+
     entry.path = target;
     Ok(make_info(id, entry))
 }
@@ -858,6 +922,11 @@ fn compress(
     let bytes_before = std::fs::metadata(&temp_in).map_err(|e| e.to_string())?.len();
 
     let mut cmd = std::process::Command::new(qpdf);
+    if let Some(pw) = &entry.doc_password {
+        // Snapshot carries the load-time encryption; decrypt into memory —
+        // save_password re-encrypts at save time.
+        cmd.arg(format!("--password={pw}")).arg("--decrypt");
+    }
     cmd.arg("--object-streams=generate")
         .arg("--compress-streams=y")
         .arg("--recompress-flate")
@@ -885,6 +954,7 @@ fn compress(
         .load_pdf_from_byte_vec(compressed, None)
         .map_err(|e| format!("Compressed output failed to reopen: {e}"))?;
     entry.doc = new_doc;
+    entry.doc_password = None; // compressed snapshot is decrypted in memory
 
     let _ = std::fs::remove_file(&temp_in);
     let _ = std::fs::remove_file(&temp_out);
@@ -1194,7 +1264,7 @@ mod tests {
 
         // Save in place (byte-vec loading means no file-handle conflict),
         // re-open, and confirm the changes persisted.
-        let info = save_doc(&mut docs, info.id, None).unwrap();
+        let info = save_doc(&mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         assert_eq!(reopened.page_count, 2);
         let heights: Vec<i32> = reopened.pages.iter().map(|p| p.height as i32).collect();
@@ -1241,7 +1311,7 @@ mod tests {
         assert!(annots[2].right > annots[2].left && annots[2].top > annots[2].bottom);
 
         // Persist and reopen: all three annotations must still be there.
-        save_doc(&mut docs, info.id, None).unwrap();
+        save_doc(&mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         let annots = list_annotations(&docs, reopened.id, 0).unwrap();
         assert_eq!(annots.len(), 3);
@@ -1277,6 +1347,55 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Password: set → save encrypts (AES-256); wrong/no password fails to
+    /// open; correct password opens; remove → save is unencrypted again.
+    #[test]
+    fn password_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let Some(qpdf) = find_qpdf(None) else {
+            eprintln!("qpdf not fetched — skipping");
+            return;
+        };
+
+        let tmp = std::env::temp_dir().join("zugapdf-test-password.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            doc.save_to_file(&tmp).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        assert!(!info.has_password);
+
+        // Set password and save.
+        docs.get_mut(&info.id).unwrap().save_password = Some("hunter2".into());
+        let saved = save_doc(&mut docs, info.id, None, Some(&qpdf)).unwrap();
+        assert!(saved.has_password);
+
+        // No password / wrong password → PASSWORD_REQUIRED; correct opens.
+        let err = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap_err();
+        assert_eq!(err, "PASSWORD_REQUIRED");
+        let err =
+            open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), Some("wrong".into()))
+                .unwrap_err();
+        assert_eq!(err, "PASSWORD_REQUIRED");
+        let reopened =
+            open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), Some("hunter2".into()))
+                .unwrap();
+        assert!(reopened.has_password, "open password should stick for future saves");
+
+        // Remove password, save, reopen without one.
+        docs.get_mut(&reopened.id).unwrap().save_password = None;
+        save_doc(&mut docs, reopened.id, None, Some(&qpdf)).unwrap();
+        let plain = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        assert!(!plain.has_password);
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// Form fill: list fields, set text + checkbox, persist through save.
@@ -1315,7 +1434,7 @@ mod tests {
         );
 
         // Persist and reopen.
-        save_doc(&mut docs, info.id, None).unwrap();
+        save_doc(&mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         let fields = list_form_fields(&docs, reopened.id, 0).unwrap();
         assert_eq!(fields.iter().find(|f| f.name == "full_name").unwrap().value, "Buga Delgado");
@@ -1383,7 +1502,7 @@ mod tests {
         assert!(outcome.bytes_before > 0 && outcome.bytes_after > 0);
 
         // The compressed doc replaced the in-memory one; it must still save.
-        save_doc(&mut docs, info.id, None).unwrap();
+        save_doc(&mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
         assert_eq!(reopened.page_count, 4);
 
@@ -1419,7 +1538,7 @@ mod tests {
         let heights: Vec<i32> = info.pages.iter().map(|p| p.height as i32).collect();
         assert_eq!(heights, vec![700, 700, 500, 500, 500]);
 
-        save_doc(&mut docs, info.id, None).unwrap();
+        save_doc(&mut docs, info.id, None, None).unwrap();
         let reopened = open_doc(pdfium, &mut docs, &mut next_id, base.clone(), None).unwrap();
         assert_eq!(reopened.page_count, 5);
 
