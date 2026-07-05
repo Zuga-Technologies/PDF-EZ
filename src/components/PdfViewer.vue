@@ -11,6 +11,8 @@ interface RenderSlot {
 }
 
 const doc = ref<DocInfo | null>(null);
+const toolsOpen = ref(true);
+const railOpen = ref(true);
 const pages = reactive<RenderSlot[]>([]);
 const thumbs = reactive<RenderSlot[]>([]);
 const selected = ref<Set<number>>(new Set());
@@ -890,6 +892,9 @@ onBeforeUnmount(() => {
 <template>
   <div class="viewer">
     <header class="toolbar">
+      <button class="tools-toggle" :class="{ active: toolsOpen }" title="Show or hide the tools panel" @click="toolsOpen = !toolsOpen">
+        Tools
+      </button>
       <button class="iconbtn primary" title="Open PDF (file stays on this machine)" aria-label="Open PDF" @click="openFile">
         <Icon name="folder-open" />
       </button>
@@ -900,42 +905,6 @@ onBeforeUnmount(() => {
         <button class="iconbtn" :disabled="busy" title="Save as… (Ctrl+Shift+S)" aria-label="Save as" @click="saveAs">
           <Icon name="save-all" />
         </button>
-        <span class="divider"></span>
-        <button class="iconbtn" :disabled="busy" title="Merge — append pages from other PDFs" aria-label="Merge PDFs" @click="mergeFiles">
-          <Icon name="merge" />
-        </button>
-        <button class="iconbtn" :disabled="busy" title="Compress — shrink file size" aria-label="Compress" @click="compressDoc">
-          <Icon name="shrink" />
-        </button>
-        <button
-          class="iconbtn"
-          :class="{ active: doc.has_password }"
-          :disabled="busy"
-          :title="doc.has_password ? 'Protected — saves are AES-256 encrypted. Click to change/remove.' : 'Protect with a password'"
-          aria-label="Password protection"
-          @click="((protectOpen = !protectOpen), (protectError = null))"
-        >
-          <Icon :name="doc.has_password ? 'lock' : 'lock-open'" />
-        </button>
-        <button class="iconbtn" :disabled="busy" title="Watermark / header & footer" aria-label="Watermark and header/footer" @click="stampOpen = !stampOpen">
-          <Icon name="stamp" />
-        </button>
-        <span class="divider"></span>
-        <button class="iconbtn" :class="{ active: tool === 'select' }" title="Select — click marks or form fields (Esc)" aria-label="Select tool"
-          @click="((tool = 'select'), (selectedAnnot = null))"><Icon name="pointer" /></button>
-        <button class="iconbtn" :class="{ active: tool === 'highlight' }" title="Highlight — drag over text" aria-label="Highlight tool"
-          @click="tool = tool === 'highlight' ? 'select' : 'highlight'"><Icon name="highlighter" /></button>
-        <button class="iconbtn" :class="{ active: tool === 'note' }" title="Note — click the page" aria-label="Note tool"
-          @click="tool = tool === 'note' ? 'select' : 'note'"><Icon name="sticky-note" /></button>
-        <button class="iconbtn" :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)" aria-label="Draw tool"
-          @click="tool = tool === 'ink' ? 'select' : 'ink'"><Icon name="pen" /></button>
-        <span class="divider"></span>
-        <button class="iconbtn" :disabled="!selected.size || busy" title="Rotate selected pages left" aria-label="Rotate left"
-          @click="rotateSelection(-1)"><Icon name="rotate-ccw" /></button>
-        <button class="iconbtn" :disabled="!selected.size || busy" title="Rotate selected pages right" aria-label="Rotate right"
-          @click="rotateSelection(1)"><Icon name="rotate-cw" /></button>
-        <button class="iconbtn" :disabled="!selected.size || busy" title="Delete selected pages" aria-label="Delete pages"
-          @click="deleteSelection"><Icon name="trash" /></button>
       </template>
       <div class="spacer"></div>
       <template v-if="doc">
@@ -1027,7 +996,38 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="body">
-      <aside v-if="doc" ref="rail" class="rail">
+      <aside v-if="toolsOpen" class="tools-panel">
+        <p class="tools-title">All tools</p>
+        <button class="tool-item" :disabled="!doc" @click="railOpen = !railOpen">
+          <Icon name="layout-grid" /> Organize pages
+          <span v-if="railOpen && doc" class="tool-state">shown</span>
+        </button>
+        <button class="tool-item" :disabled="!doc || busy" @click="mergeFiles">
+          <Icon name="merge" /> Combine files
+        </button>
+        <button class="tool-item" :disabled="!doc || busy" @click="compressDoc">
+          <Icon name="shrink" /> Compress a PDF
+        </button>
+        <button class="tool-item" :disabled="!doc || busy" @click="((protectOpen = true), (protectError = null))">
+          <Icon :name="doc?.has_password ? 'lock' : 'lock-open'" /> Protect a PDF
+          <span v-if="doc?.has_password" class="tool-state">on</span>
+        </button>
+        <button class="tool-item" :disabled="!doc || busy" @click="stampOpen = true">
+          <Icon name="stamp" /> Watermark &amp; stamps
+        </button>
+        <p class="tools-soon">Coming: Edit a PDF · Export a PDF · Scan &amp; OCR · Redact · Sign</p>
+      </aside>
+
+      <aside v-if="doc && railOpen" ref="rail" class="rail">
+        <div class="rail-head">
+          <span v-if="!selected.size" class="rail-label">Pages</span>
+          <template v-else>
+            <span class="rail-label">{{ selected.size }} selected</span>
+            <button class="iconbtn" :disabled="busy" title="Rotate left" aria-label="Rotate left" @click="rotateSelection(-1)"><Icon name="rotate-ccw" /></button>
+            <button class="iconbtn" :disabled="busy" title="Rotate right" aria-label="Rotate right" @click="rotateSelection(1)"><Icon name="rotate-cw" /></button>
+            <button class="iconbtn" :disabled="busy" title="Delete pages" aria-label="Delete pages" @click="deleteSelection"><Icon name="trash" /></button>
+          </template>
+        </div>
         <div
           v-for="(thumb, index) in thumbs"
           :key="index"
@@ -1051,6 +1051,17 @@ onBeforeUnmount(() => {
           <span class="thumbnum">{{ index + 1 }}</span>
         </div>
       </aside>
+
+      <div v-if="doc" class="quicktools">
+        <button class="iconbtn" :class="{ active: tool === 'select' }" title="Select — click marks or form fields (Esc)" aria-label="Select tool"
+          @click="((tool = 'select'), (selectedAnnot = null))"><Icon name="pointer" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'highlight' }" title="Highlight — drag over text" aria-label="Highlight tool"
+          @click="tool = tool === 'highlight' ? 'select' : 'highlight'"><Icon name="highlighter" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'note' }" title="Note — click the page" aria-label="Note tool"
+          @click="tool = tool === 'note' ? 'select' : 'note'"><Icon name="sticky-note" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)" aria-label="Draw tool"
+          @click="tool = tool === 'ink' ? 'select' : 'ink'"><Icon name="pen" /></button>
+      </div>
 
       <div ref="scroller" class="well">
         <div v-if="needsPassword" class="notice">
@@ -1250,6 +1261,84 @@ onBeforeUnmount(() => {
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
+}
+.tools-toggle {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.tools-panel {
+  flex: none;
+  width: 15rem;
+  border-right: 1px solid var(--chrome-line);
+  padding: 0.9rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow-y: auto;
+}
+.tools-title {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 0 0 0.4rem 0.25rem;
+}
+.tool-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.88rem;
+}
+.tool-item:hover:not(:disabled) { background: var(--chrome-raised); border: none; }
+.tool-item .lucide { color: var(--accent); }
+.tool-state {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--ok);
+  text-transform: uppercase;
+}
+.tools-soon {
+  margin: 0.75rem 0.25rem 0;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.quicktools {
+  position: absolute;
+  z-index: 10;
+  top: 1rem;
+  left: calc(100% - 4rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  background: var(--chrome);
+  border: 1px solid var(--chrome-line);
+  border-radius: 8px;
+  padding: 0.3rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.rail-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2.2rem;
+  padding-bottom: 0.35rem;
+}
+.rail-label {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
 }
 .rail {
   flex: none;

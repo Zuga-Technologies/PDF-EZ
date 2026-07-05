@@ -30,6 +30,8 @@ const paths: Record<string, string> = {
     '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
   minus: '<path d="M5 12h14"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  "layout-grid":
+    '<rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>',
   "chevron-left": '<path d="m15 18-6-6 6-6"/>',
   "chevron-right": '<path d="m9 18 6-6-6-6"/>',
 };
