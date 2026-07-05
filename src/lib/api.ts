@@ -86,6 +86,10 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  addWatermark: (id: number, text: string, size: number, opacity: number, diagonal: boolean) =>
+    invoke<DocInfo>("add_watermark", { id, text, size, opacity, diagonal }),
+  addHeaderFooter: (id: number, top: boolean, align: number, template: string) =>
+    invoke<DocInfo>("add_header_footer", { id, top, align, template }),
   setDocumentPassword: (id: number, password: string | null) =>
     invoke<DocInfo>("set_document_password", { id, password }),
   listFormFields: (id: number, page: number) =>

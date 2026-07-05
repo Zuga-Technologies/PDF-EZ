@@ -143,6 +143,25 @@ pub enum PdfRequest {
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
     },
+    /// Diagonal or straight text watermark across every page.
+    AddWatermark {
+        id: u32,
+        text: String,
+        size: f32,
+        /// 0-100
+        opacity: u8,
+        diagonal: bool,
+        reply: Sender<Result<DocInfo, String>>,
+    },
+    /// Header or footer line on every page. `template` supports {page} and
+    /// {pages}. `align`: 0 = left, 1 = center, 2 = right.
+    AddHeaderFooter {
+        id: u32,
+        top: bool,
+        align: u8,
+        template: String,
+        reply: Sender<Result<DocInfo, String>>,
+    },
     /// Set (Some) or remove (None) the password applied at save time.
     SetDocumentPassword {
         id: u32,
@@ -349,6 +368,12 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path, qpdf.as_deref());
                         let _ = reply.send(result);
                     }
+                    PdfRequest::AddWatermark { id, text, size, opacity, diagonal, reply } => {
+                        let _ = reply.send(add_watermark(&mut docs, id, &text, size, opacity, diagonal));
+                    }
+                    PdfRequest::AddHeaderFooter { id, top, align, template, reply } => {
+                        let _ = reply.send(add_header_footer(&mut docs, id, top, align, &template));
+                    }
                     PdfRequest::SetDocumentPassword { id, password, reply } => {
                         let result = docs
                             .get_mut(&id)
@@ -409,6 +434,8 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SetDocumentPassword { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::AddWatermark { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::AddHeaderFooter { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ListFormFields { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SetFormField { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SearchDocument { reply, .. } => drop(reply.send(Err(e))),
@@ -744,6 +771,100 @@ fn save_doc(
     }
 
     entry.path = target;
+    Ok(make_info(id, entry))
+}
+
+// ---- watermark / header-footer ----
+
+fn add_watermark(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    text: &str,
+    size: f32,
+    opacity: u8,
+    diagonal: bool,
+) -> Result<DocInfo, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    if text.trim().is_empty() {
+        return Err("Watermark text is empty".to_string());
+    }
+    let font = entry.doc.fonts_mut().helvetica_bold();
+    let alpha = (opacity.min(100) as f32 * 2.55) as u8;
+    let size = size.clamp(8.0, 300.0);
+
+    entry
+        .doc
+        .pages()
+        .watermark(|group, _index, width, height| {
+            let mut object = PdfPageTextObject::new(
+                &entry.doc,
+                text,
+                font,
+                PdfPoints::new(size),
+            )?;
+            object.set_fill_color(PdfColor::new(128, 128, 128, alpha))?;
+            if diagonal {
+                object.rotate_counter_clockwise_degrees(45.0)?;
+            }
+            // Center via the object's post-rotation bounds.
+            let bounds = object.bounds()?;
+            let cx = (bounds.left().value + bounds.right().value) / 2.0;
+            let cy = (bounds.bottom().value + bounds.top().value) / 2.0;
+            object.translate(
+                PdfPoints::new(width.value / 2.0 - cx),
+                PdfPoints::new(height.value / 2.0 - cy),
+            )?;
+            group.push(&mut object.into())?;
+            Ok(())
+        })
+        .map_err(|e| format!("Watermark failed: {e}"))?;
+
+    Ok(make_info(id, entry))
+}
+
+fn add_header_footer(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    top: bool,
+    align: u8,
+    template: &str,
+) -> Result<DocInfo, String> {
+    const MARGIN: f32 = 28.0;
+    const SIZE: f32 = 10.0;
+
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    if template.trim().is_empty() {
+        return Err("Header/footer text is empty".to_string());
+    }
+    let font = entry.doc.fonts_mut().helvetica();
+    let total = entry.doc.pages().len();
+
+    entry
+        .doc
+        .pages()
+        .watermark(|group, index, width, height| {
+            let line = template
+                .replace("{page}", &(index + 1).to_string())
+                .replace("{pages}", &total.to_string());
+            let mut object =
+                PdfPageTextObject::new(&entry.doc, &line, font, PdfPoints::new(SIZE))?;
+            object.set_fill_color(PdfColor::new(60, 60, 60, 255))?;
+            let text_width = {
+                let b = object.bounds()?;
+                b.right().value - b.left().value
+            };
+            let x = match align {
+                0 => MARGIN,
+                2 => width.value - MARGIN - text_width,
+                _ => (width.value - text_width) / 2.0,
+            };
+            let y = if top { height.value - MARGIN } else { MARGIN - SIZE / 2.0 };
+            object.translate(PdfPoints::new(x), PdfPoints::new(y))?;
+            group.push(&mut object.into())?;
+            Ok(())
+        })
+        .map_err(|e| format!("Header/footer failed: {e}"))?;
+
     Ok(make_info(id, entry))
 }
 
@@ -1347,6 +1468,42 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Watermark and header/footer add REAL text objects — provable by search.
+    #[test]
+    fn watermark_and_header_footer() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !fixture.exists() {
+            eprintln!("Alpha.pdf not generated — skipping");
+            return;
+        }
+        let tmp = std::env::temp_dir().join("zugapdf-test-stamp.pdf");
+        std::fs::copy(&fixture, &tmp).unwrap();
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+
+        add_watermark(&mut docs, info.id, "CONFIDENTIAL", 60.0, 40, true).unwrap();
+        let hits = search_document(&docs, info.id, "CONFIDENTIAL", true).unwrap();
+        let count = hits.iter().map(|h| h.hit).max().map(|m| m + 1).unwrap_or(0);
+        assert_eq!(count, 3, "watermark on every page");
+
+        add_header_footer(&mut docs, info.id, false, 1, "Page {page} of {pages}").unwrap();
+        let hits = search_document(&docs, info.id, "Page 2 of 3", true).unwrap();
+        assert!(!hits.is_empty(), "footer with substituted page numbers");
+
+        // Persists through save → reopen.
+        save_doc(&mut docs, info.id, None, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let hits = search_document(&docs, reopened.id, "CONFIDENTIAL", true).unwrap();
+        assert!(!hits.is_empty());
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// Password: set → save encrypts (AES-256); wrong/no password fails to

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { api, type DocInfo, type FieldInfo, type SearchHit } from "../lib/api";
+import Icon from "./Icon.vue";
 
 interface RenderSlot {
   url: string | null;
@@ -61,6 +62,40 @@ interface DragState {
 const drag = ref<DragState | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
+
+// ---- watermark / header-footer (stamp) ----
+const stampOpen = ref(false);
+const wmText = ref("CONFIDENTIAL");
+const wmSize = ref(64);
+const wmOpacity = ref(30);
+const wmDiagonal = ref(true);
+const hfTop = ref(false);
+const hfAlign = ref(1);
+const hfTemplate = ref("Page {page} of {pages}");
+
+async function applyWatermark() {
+  if (!doc.value) return;
+  try {
+    applyInfo(await api.addWatermark(doc.value.id, wmText.value, wmSize.value, wmOpacity.value, wmDiagonal.value));
+    dirty.value = true;
+    stampOpen.value = false;
+    status.value = "Watermark applied to every page — Save to keep it";
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+async function applyHeaderFooter() {
+  if (!doc.value) return;
+  try {
+    applyInfo(await api.addHeaderFooter(doc.value.id, hfTop.value, hfAlign.value, hfTemplate.value));
+    dirty.value = true;
+    stampOpen.value = false;
+    status.value = `${hfTop.value ? "Header" : "Footer"} applied — Save to keep it`;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
 
 // ---- protect (password) ----
 const protectOpen = ref(false);
@@ -855,77 +890,52 @@ onBeforeUnmount(() => {
 <template>
   <div class="viewer">
     <header class="toolbar">
-      <button class="primary" @click="openFile">Open PDF…</button>
+      <button class="iconbtn primary" title="Open PDF (file stays on this machine)" aria-label="Open PDF" @click="openFile">
+        <Icon name="folder-open" />
+      </button>
       <template v-if="doc">
-        <button :disabled="!dirty || busy" title="Ctrl+S" @click="saveNow">Save</button>
-        <button :disabled="busy" title="Ctrl+Shift+S" @click="saveAs">Save as…</button>
-        <button :disabled="busy" title="Append pages from other PDFs" @click="mergeFiles">
-          Merge…
+        <button class="iconbtn" :disabled="!dirty || busy" title="Save (Ctrl+S)" aria-label="Save" @click="saveNow">
+          <Icon name="save" />
         </button>
-        <button :disabled="busy" title="Shrink file size (structure + streams)" @click="compressDoc">
-          Compress
+        <button class="iconbtn" :disabled="busy" title="Save as… (Ctrl+Shift+S)" aria-label="Save as" @click="saveAs">
+          <Icon name="save-all" />
+        </button>
+        <span class="divider"></span>
+        <button class="iconbtn" :disabled="busy" title="Merge — append pages from other PDFs" aria-label="Merge PDFs" @click="mergeFiles">
+          <Icon name="merge" />
+        </button>
+        <button class="iconbtn" :disabled="busy" title="Compress — shrink file size" aria-label="Compress" @click="compressDoc">
+          <Icon name="shrink" />
         </button>
         <button
-          class="with-icon"
+          class="iconbtn"
           :class="{ active: doc.has_password }"
           :disabled="busy"
-          :title="doc.has_password ? 'Saves are encrypted (AES-256) — click to change/remove' : 'Password-protect this PDF'"
+          :title="doc.has_password ? 'Protected — saves are AES-256 encrypted. Click to change/remove.' : 'Protect with a password'"
+          aria-label="Password protection"
           @click="((protectOpen = !protectOpen), (protectError = null))"
         >
-          <!-- Lucide "lock" / "lock-open" (ISC license) -->
-          <svg
-            v-if="doc.has_password"
-            class="icon"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
-          <svg
-            v-else
-            class="icon"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 9.9-1" />
-          </svg>
-          {{ doc.has_password ? "Protected" : "Protect…" }}
+          <Icon :name="doc.has_password ? 'lock' : 'lock-open'" />
+        </button>
+        <button class="iconbtn" :disabled="busy" title="Watermark / header & footer" aria-label="Watermark and header/footer" @click="stampOpen = !stampOpen">
+          <Icon name="stamp" />
         </button>
         <span class="divider"></span>
-        <button
-          :disabled="!selected.size || busy"
-          title="Rotate left"
-          @click="rotateSelection(-1)"
-        >⟲</button>
-        <button
-          :disabled="!selected.size || busy"
-          title="Rotate right"
-          @click="rotateSelection(1)"
-        >⟳</button>
-        <button :disabled="!selected.size || busy" title="Delete pages" @click="deleteSelection">
-          Delete
-        </button>
+        <button class="iconbtn" :class="{ active: tool === 'select' }" title="Select — click marks or form fields (Esc)" aria-label="Select tool"
+          @click="((tool = 'select'), (selectedAnnot = null))"><Icon name="pointer" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'highlight' }" title="Highlight — drag over text" aria-label="Highlight tool"
+          @click="tool = tool === 'highlight' ? 'select' : 'highlight'"><Icon name="highlighter" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'note' }" title="Note — click the page" aria-label="Note tool"
+          @click="tool = tool === 'note' ? 'select' : 'note'"><Icon name="sticky-note" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)" aria-label="Draw tool"
+          @click="tool = tool === 'ink' ? 'select' : 'ink'"><Icon name="pen" /></button>
         <span class="divider"></span>
-        <button :class="{ active: tool === 'select' }" title="Click any highlight, note, or drawing to select and delete it (Esc)"
-          @click="((tool = 'select'), (selectedAnnot = null))">Select</button>
-        <button :class="{ active: tool === 'highlight' }" title="Drag over text to highlight"
-          @click="tool = tool === 'highlight' ? 'select' : 'highlight'">Highlight</button>
-        <button :class="{ active: tool === 'note' }" title="Click the page to leave a note"
-          @click="tool = tool === 'note' ? 'select' : 'note'">Note</button>
-        <button :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)"
-          @click="tool = tool === 'ink' ? 'select' : 'ink'">Draw</button>
+        <button class="iconbtn" :disabled="!selected.size || busy" title="Rotate selected pages left" aria-label="Rotate left"
+          @click="rotateSelection(-1)"><Icon name="rotate-ccw" /></button>
+        <button class="iconbtn" :disabled="!selected.size || busy" title="Rotate selected pages right" aria-label="Rotate right"
+          @click="rotateSelection(1)"><Icon name="rotate-cw" /></button>
+        <button class="iconbtn" :disabled="!selected.size || busy" title="Delete selected pages" aria-label="Delete pages"
+          @click="deleteSelection"><Icon name="trash" /></button>
       </template>
       <div class="spacer"></div>
       <template v-if="doc">
@@ -941,17 +951,59 @@ onBeforeUnmount(() => {
         />
         <template v-if="searchTotal">
           <span class="meta">{{ searchCurrent + 1 }}/{{ searchTotal }}</span>
-          <button aria-label="Previous match" @click="stepSearch(-1)">‹</button>
-          <button aria-label="Next match" @click="stepSearch(1)">›</button>
+          <button class="iconbtn" aria-label="Previous match" title="Previous match" @click="stepSearch(-1)"><Icon name="chevron-left" /></button>
+          <button class="iconbtn" aria-label="Next match" title="Next match" @click="stepSearch(1)"><Icon name="chevron-right" /></button>
         </template>
         <span class="divider"></span>
         <span class="doctitle" :title="doc.path">{{ title }}<i v-if="dirty"> •</i></span>
         <span class="meta">{{ doc.page_count }} {{ doc.page_count === 1 ? "page" : "pages" }}</span>
-        <button aria-label="Zoom out" @click="zoomOut">−</button>
+        <button class="iconbtn" aria-label="Zoom out" title="Zoom out" @click="zoomOut"><Icon name="minus" /></button>
         <span class="zoom">{{ Math.round(zoom * 100) }}%</span>
-        <button aria-label="Zoom in" @click="zoomIn">+</button>
+        <button class="iconbtn" aria-label="Zoom in" title="Zoom in" @click="zoomIn"><Icon name="plus" /></button>
       </template>
     </header>
+
+    <div v-if="stampOpen && doc" class="protect-modal" @pointerdown.self="stampOpen = false">
+      <div class="protect-card stamp-card">
+        <h2>Watermark</h2>
+        <div class="stamp-row">
+          <input v-model="wmText" v-focus type="text" placeholder="Watermark text" />
+        </div>
+        <div class="stamp-row">
+          <label>Size <input v-model.number="wmSize" type="number" min="8" max="300" /></label>
+          <label>Opacity <input v-model.number="wmOpacity" type="range" min="5" max="100" /> {{ wmOpacity }}%</label>
+          <label><input v-model="wmDiagonal" type="checkbox" /> Diagonal</label>
+        </div>
+        <div class="protect-actions">
+          <span class="spacer"></span>
+          <button class="primary" :disabled="!wmText.trim()" @click="applyWatermark">Apply watermark</button>
+        </div>
+        <hr />
+        <h2>Header / Footer</h2>
+        <div class="stamp-row">
+          <select v-model="hfTop">
+            <option :value="false">Footer (bottom)</option>
+            <option :value="true">Header (top)</option>
+          </select>
+          <select v-model.number="hfAlign">
+            <option :value="0">Left</option>
+            <option :value="1">Center</option>
+            <option :value="2">Right</option>
+          </select>
+        </div>
+        <div class="stamp-row">
+          <input v-model="hfTemplate" type="text" placeholder="Page {page} of {pages}" />
+        </div>
+        <p class="protect-hint">{page} and {pages} are replaced per page. Applies to all pages; reopen without saving to undo.</p>
+        <div class="protect-actions">
+          <button type="button" @click="stampOpen = false">Close</button>
+          <span class="spacer"></span>
+          <button class="primary" :disabled="!hfTemplate.trim()" @click="applyHeaderFooter">
+            Apply {{ hfTop ? "header" : "footer" }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="protectOpen && doc" class="protect-modal" @pointerdown.self="protectOpen = false">
       <form class="protect-card" @submit.prevent="applyProtect">
@@ -1303,15 +1355,28 @@ onBeforeUnmount(() => {
   padding: 0.3rem 0.6rem;
 }
 .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-button.with-icon {
+.iconbtn {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  padding: 0;
+  font-size: 0.95rem;
 }
-button.with-icon .icon {
-  width: 0.95em;
-  height: 0.95em;
-  flex: none;
+.stamp-card { width: 26rem; }
+.stamp-card hr { border: none; border-top: 1px solid var(--chrome-line); margin: 0.75rem 0 0.25rem; }
+.stamp-row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.stamp-row label { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--text-dim); }
+.stamp-row input[type="number"] { width: 4.5rem; }
+.stamp-row input[type="text"] { flex: 1; }
+.stamp-row select {
+  font: inherit;
+  background: var(--chrome-raised);
+  color: var(--text);
+  border: 1px solid var(--chrome-line);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
 }
 .protect-modal {
   position: fixed;

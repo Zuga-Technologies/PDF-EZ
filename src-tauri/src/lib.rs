@@ -90,6 +90,31 @@ async fn save_document(
 }
 
 #[tauri::command]
+async fn add_watermark(
+    app: tauri::AppHandle,
+    id: u32,
+    text: String,
+    size: f32,
+    opacity: u8,
+    diagonal: bool,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::AddWatermark { id, text, size, opacity, diagonal, reply })
+        .await
+}
+
+#[tauri::command]
+async fn add_header_footer(
+    app: tauri::AppHandle,
+    id: u32,
+    top: bool,
+    align: u8,
+    template: String,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::AddHeaderFooter { id, top, align, template, reply })
+        .await
+}
+
+#[tauri::command]
 async fn set_document_password(
     app: tauri::AppHandle,
     id: u32,
@@ -242,6 +267,8 @@ pub fn run() {
             reorder_pages,
             save_document,
             set_document_password,
+            add_watermark,
+            add_header_footer,
             compress_document,
             search_document,
             list_form_fields,
