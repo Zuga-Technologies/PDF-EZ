@@ -47,6 +47,17 @@ const drag = ref<DragState | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
 
+/// Committed marks kept on screen until the engine re-render lands, so the
+/// page never shows a gap between preview and painted annotation.
+interface PendingMark {
+  key: number;
+  page: number;
+  rect?: { left: number; top: number; width: number; height: number };
+  points?: [number, number][];
+}
+const pendingMarks = ref<PendingMark[]>([]);
+let pendingKey = 0;
+
 const title = computed(() => {
   // Filename, always — PDF metadata titles are junk too often ("(anonymous)",
   // "Microsoft Word - final_v2.docx") to put in the toolbar.
@@ -325,13 +336,26 @@ async function onPagePointerUp(index: number) {
     const [x0, y0] = cssToPdf(index, Math.min(d.startX, d.x), Math.max(d.startY, d.y));
     const [x1, y1] = cssToPdf(index, Math.max(d.startX, d.x), Math.min(d.startY, d.y));
     if (Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return; // accidental click
-    await addAnnotation(index, (id) =>
+    const mark: PendingMark = {
+      key: pendingKey++,
+      page: index,
+      rect: {
+        left: Math.min(d.startX, d.x),
+        top: Math.min(d.startY, d.y),
+        width: Math.abs(d.x - d.startX),
+        height: Math.abs(d.y - d.startY),
+      },
+    };
+    await addAnnotation(index, mark, (id) =>
       api.addHighlight(id, index, { left: x0, bottom: y0, right: x1, top: y1 }, HIGHLIGHT_COLOR),
     );
   } else if (tool.value === "ink") {
     if (d.points.length < 2) return;
     const stroke = d.points.map(([x, y]) => cssToPdf(index, x, y));
-    await addAnnotation(index, (id) => api.addInk(id, index, [stroke], INK_COLOR, INK_WIDTH_PT));
+    const mark: PendingMark = { key: pendingKey++, page: index, points: d.points };
+    await addAnnotation(index, mark, (id) =>
+      api.addInk(id, index, [stroke], INK_COLOR, INK_WIDTH_PT),
+    );
   }
 }
 
@@ -340,21 +364,27 @@ async function submitNote() {
   noteDraft.value = null;
   if (!draft || !draft.text.trim() || !doc.value) return;
   const [x, y] = cssToPdf(draft.page, draft.x, draft.y);
-  await addAnnotation(draft.page, (id) => api.addNote(id, draft.page, x, y, draft.text.trim()));
+  await addAnnotation(draft.page, null, (id) =>
+    api.addNote(id, draft.page, x, y, draft.text.trim()),
+  );
 }
 
 async function addAnnotation(
   index: number,
+  mark: PendingMark | null,
   op: (docId: number) => Promise<import("../lib/api").AnnotInfo[]>,
 ) {
   if (!doc.value) return;
+  if (mark) pendingMarks.value.push(mark);
   try {
     const annots = await op(doc.value.id);
     if (annots.length) undoStack.push({ page: index, index: annots.length - 1 });
     dirty.value = true;
-    refreshPage(index);
+    await refreshPage(index);
   } catch (e) {
     error.value = String(e);
+  } finally {
+    if (mark) pendingMarks.value = pendingMarks.value.filter((m) => m.key !== mark.key);
   }
 }
 
@@ -364,25 +394,24 @@ async function undoAnnotation() {
   try {
     await api.deleteAnnotation(doc.value.id, last.page, last.index);
     dirty.value = true;
-    refreshPage(last.page);
+    await refreshPage(last.page);
   } catch (e) {
     error.value = String(e);
   }
 }
 
-function refreshPage(index: number) {
-  const page = pages[index];
-  if (page) {
-    page.url = null;
-    page.renderedWidth = 0;
-  }
+/// Re-render a page after a content change WITHOUT dropping the current
+/// bitmap — the old image stays up until the new one swaps in (no blink).
+async function refreshPage(index: number) {
   const thumb = thumbs[index];
-  if (thumb) {
-    thumb.url = null;
-    thumb.renderedWidth = 0;
-  }
-  if (visiblePages.has(index)) renderPageIfStale(index);
+  if (thumb) thumb.renderedWidth = 0;
   if (visibleThumbs.has(index)) renderThumbIfStale(index);
+
+  const page = pages[index];
+  if (page) page.renderedWidth = 0;
+  if (visiblePages.has(index)) {
+    await renderSlot(pages, index, Math.round(cssWidth(index) * dpr()), true);
+  }
 }
 
 // ---- save ----
@@ -570,6 +599,22 @@ onBeforeUnmount(() => {
             <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
               <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
             </svg>
+
+            <template v-for="mark in pendingMarks" :key="mark.key">
+              <div
+                v-if="mark.page === index && mark.rect"
+                class="live-highlight"
+                :style="{
+                  left: mark.rect.left + 'px',
+                  top: mark.rect.top + 'px',
+                  width: mark.rect.width + 'px',
+                  height: mark.rect.height + 'px',
+                }"
+              ></div>
+              <svg v-if="mark.page === index && mark.points" class="live-ink">
+                <polyline :points="mark.points.map((p) => p.join(',')).join(' ')" />
+              </svg>
+            </template>
 
             <form
               v-if="noteDraft && noteDraft.page === index"
