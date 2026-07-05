@@ -867,7 +867,36 @@ fn set_text_object(
     text: &str,
 ) -> Result<Vec<ObjInfo>, String> {
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
-    {
+
+    // Subset-embedded fonts (name like "ABCDEF+Calibri") only carry the glyphs
+    // the document originally used — setting new text through them fails or
+    // renders blanks. Detect that up front and rebuild the object with a full
+    // standard font instead (same position/size/color), which is what other
+    // editors do too.
+    let (needs_replacement, size, color, left, bottom) = {
+        let page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let object = page
+            .objects()
+            .get(index.into())
+            .map_err(|e| format!("Object not found: {e}"))?;
+        let text_obj = object.as_text_object().ok_or("That object is not text")?;
+        let font_name = text_obj.font().name();
+        let subset = font_name.len() > 7 && font_name.as_bytes()[6] == b'+';
+        let bounds = object.bounds().map_err(|e| format!("Object bounds: {e}"))?;
+        (
+            subset,
+            text_obj.scaled_font_size(),
+            text_obj.fill_color().unwrap_or(PdfColor::new(0, 0, 0, 255)),
+            bounds.left(),
+            bounds.bottom(),
+        )
+    };
+
+    if !needs_replacement {
         let mut page = entry
             .doc
             .pages()
@@ -877,13 +906,45 @@ fn set_text_object(
             .objects()
             .get(index.into())
             .map_err(|e| format!("Object not found: {e}"))?;
-        let text_obj = object
+        let set_result = object
             .as_text_object_mut()
-            .ok_or("That object is not text")?;
-        text_obj
-            .set_text(text)
-            .map_err(|e| format!("Could not edit text (the font may not contain the new characters): {e}"))?;
+            .ok_or("That object is not text")?
+            .set_text(text);
+        if set_result.is_ok() {
+            page.regenerate_content().map_err(|e| format!("Could not update the page: {e}"))?;
+            return obj_infos(&entry.doc, page_index);
+        }
+        // set_text failed even on a non-subset font — fall through to replace.
+    }
+
+    // Rebuild: new Helvetica text object at the old position, then remove the
+    // original (remove AFTER add so `index` stays valid).
+    let font = entry.doc.fonts_mut().helvetica();
+    let mut new_obj = PdfPageTextObject::new(&entry.doc, text, font, size)
+        .map_err(|e| format!("Could not rebuild text: {e}"))?;
+    new_obj.set_fill_color(color).map_err(|e| format!("Could not rebuild text: {e}"))?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        // Position at the old object's left/bottom (new objects sit at origin).
+        let b = new_obj.bounds().map_err(|e| format!("Could not rebuild text: {e}"))?;
+        new_obj
+            .translate(left - b.left(), bottom - b.bottom())
+            .map_err(|e| format!("Could not rebuild text: {e}"))?;
+        page.objects_mut()
+            .add_text_object(new_obj)
+            .map_err(|e| format!("Could not rebuild text: {e}"))?;
+        let removed = page
+            .objects_mut()
+            .remove_object_at_index(index.into())
+            .map_err(|e| format!("Could not replace the original text: {e}"))?;
         page.regenerate_content().map_err(|e| format!("Could not update the page: {e}"))?;
+        // Same double-free hazard as delete_page_object — leak the handle.
+        std::mem::forget(removed);
     }
     obj_infos(&entry.doc, page_index)
 }
