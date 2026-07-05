@@ -74,6 +74,7 @@ function makeObserver(
   root: HTMLElement | null,
   visible: Set<number>,
   render: (index: number) => void,
+  onExit?: (index: number) => void,
 ): IntersectionObserver {
   return new IntersectionObserver(
     (entries) => {
@@ -84,6 +85,7 @@ function makeObserver(
           render(index);
         } else {
           visible.delete(index);
+          onExit?.(index);
         }
       }
     },
@@ -91,13 +93,13 @@ function makeObserver(
   );
 }
 
-async function renderSlot(slots: RenderSlot[], index: number, want: number) {
+async function renderSlot(slots: RenderSlot[], index: number, want: number, jpeg: boolean) {
   if (!doc.value) return;
   const slot = slots[index];
   if (!slot || slot.loading || (slot.url && slot.renderedWidth === want)) return;
   slot.loading = true;
   try {
-    const rendered = await api.renderPage(doc.value.id, index, want);
+    const rendered = await api.renderPage(doc.value.id, index, want, jpeg);
     slot.url = rendered.data_url;
     slot.renderedWidth = want;
   } catch (e) {
@@ -111,7 +113,7 @@ function renderPageIfStale(index: number) {
   const want = Math.round(cssWidth(index) * dpr());
   const slot = pages[index];
   if (slot && (!slot.url || slot.renderedWidth !== want)) {
-    void renderSlot(pages, index, want).then(() => {
+    void renderSlot(pages, index, want, true).then(() => {
       // Zoom may have moved again while this render was in flight.
       const now = Math.round(cssWidth(index) * dpr());
       if (visiblePages.has(index) && pages[index] && pages[index].renderedWidth !== now) {
@@ -121,7 +123,16 @@ function renderPageIfStale(index: number) {
   }
 }
 function renderThumbIfStale(index: number) {
-  void renderSlot(thumbs, index, Math.round(THUMB_CSS_WIDTH * dpr()));
+  void renderSlot(thumbs, index, Math.round(THUMB_CSS_WIDTH * dpr()), false);
+}
+// Full-page bitmaps are big; drop them once a page scrolls far off-screen so
+// a long document can't accumulate hundreds of MB inside the webview.
+function evictPage(index: number) {
+  const slot = pages[index];
+  if (slot && !slot.loading) {
+    slot.url = null;
+    slot.renderedWidth = 0;
+  }
 }
 
 watch(zoom, () => {
@@ -303,7 +314,7 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 onMounted(() => {
-  pageObserver = makeObserver(scroller.value, visiblePages, renderPageIfStale);
+  pageObserver = makeObserver(scroller.value, visiblePages, renderPageIfStale, evictPage);
   thumbObserver = makeObserver(rail.value, visibleThumbs, renderThumbIfStale);
   window.addEventListener("keydown", onKeydown);
 });

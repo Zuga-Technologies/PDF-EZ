@@ -53,6 +53,8 @@ pub enum PdfRequest {
         id: u32,
         index: u16,
         target_width: u32,
+        /// JPEG (fast, small — main pages) vs PNG (thumbnails).
+        jpeg: bool,
         reply: Sender<Result<RenderedPage, String>>,
     },
     PageText {
@@ -165,9 +167,12 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         docs.remove(&id);
                         let _ = reply.send(Ok(()));
                     }
-                    PdfRequest::Render { id, index, target_width, reply } => {
-                        let result = render_page(&docs, id, index, target_width);
-                        let _ = reply.send(result);
+                    PdfRequest::Render { id, index, target_width, jpeg, reply } => {
+                        // Skip stale renders whose caller already gave up —
+                        // keeps a queue pileup from freezing the engine thread.
+                        if reply.send(render_page(&docs, id, index, target_width, jpeg)).is_err() {
+                            continue;
+                        }
                     }
                     PdfRequest::PageText { id, index, reply } => {
                         let result = page_text(&docs, id, index);
@@ -212,12 +217,19 @@ fn fail(req: PdfRequest, err: &str) {
 }
 
 fn make_info(id: u32, entry: &OpenDoc) -> DocInfo {
+    // page_sizes() reads dimensions without loading page objects — iterating
+    // pages here froze the app on large documents.
     let pages: Vec<PageDims> = entry
         .doc
         .pages()
-        .iter()
-        .map(|p| PageDims { width: p.width().value, height: p.height().value })
-        .collect();
+        .page_sizes()
+        .map(|sizes| {
+            sizes
+                .iter()
+                .map(|r| PageDims { width: r.width().value, height: r.height().value })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let title = entry
         .doc
@@ -269,6 +281,7 @@ fn render_page(
     id: u32,
     index: u16,
     target_width: u32,
+    jpeg: bool,
 ) -> Result<RenderedPage, String> {
     let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
     let page = doc
@@ -288,17 +301,27 @@ fn render_page(
         .as_image()
         .map_err(|e| format!("Bitmap conversion failed: {e}"))?;
 
-    let mut png = Cursor::new(Vec::new());
-    image
-        .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|e| format!("PNG encode failed: {e}"))?;
+    let (width_px, height_px) = (image.width(), image.height());
+    let mut buf = Cursor::new(Vec::new());
+    let mime = if jpeg {
+        // JPEG can't carry alpha; pdfium bitmaps come back RGBA.
+        image::DynamicImage::ImageRgb8(image.to_rgb8())
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .map_err(|e| format!("JPEG encode failed: {e}"))?;
+        "image/jpeg"
+    } else {
+        image
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .map_err(|e| format!("PNG encode failed: {e}"))?;
+        "image/png"
+    };
 
-    let b64 = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
     Ok(RenderedPage {
         index,
-        width_px: image.width(),
-        height_px: image.height(),
-        data_url: format!("data:image/png;base64,{b64}"),
+        width_px,
+        height_px,
+        data_url: format!("data:{mime};base64,{b64}"),
     })
 }
 

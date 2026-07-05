@@ -31,8 +31,8 @@ export const api = {
   openDocument: (path: string, password?: string) =>
     invoke<DocInfo>("open_document", { path, password: password ?? null }),
   closeDocument: (id: number) => invoke<void>("close_document", { id }),
-  renderPage: (id: number, index: number, targetWidth: number) =>
-    invoke<RenderedPage>("render_page", { id, index, targetWidth }),
+  renderPage: (id: number, index: number, targetWidth: number, jpeg: boolean) =>
+    invoke<RenderedPage>("render_page", { id, index, targetWidth, jpeg }),
   getPageText: (id: number, index: number) =>
     invoke<string>("get_page_text", { id, index }),
   rotatePages: (id: number, indices: number[], quarterTurns: number) =>

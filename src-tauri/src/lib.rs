@@ -46,8 +46,9 @@ async fn render_page(
     id: u32,
     index: u16,
     target_width: u32,
+    jpeg: bool,
 ) -> Result<RenderedPage, String> {
-    engine_call(app, move |reply| PdfRequest::Render { id, index, target_width, reply }).await
+    engine_call(app, move |reply| PdfRequest::Render { id, index, target_width, jpeg, reply }).await
 }
 
 #[tauri::command]
