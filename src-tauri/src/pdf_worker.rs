@@ -378,9 +378,11 @@ fn render_page(
     let bitmap = page
         .render_with_config(&config)
         .map_err(|e| format!("Render failed: {e}"))?;
-    let image = bitmap
+    let mut image = bitmap
         .as_image()
         .map_err(|e| format!("Bitmap conversion failed: {e}"))?;
+
+    composite_highlights(&page, &mut image);
 
     let (width_px, height_px) = (image.width(), image.height());
     let mut buf = Cursor::new(Vec::new());
@@ -404,6 +406,63 @@ fn render_page(
         height_px,
         data_url: format!("data:{mime};base64,{b64}"),
     })
+}
+
+/// PDFium never synthesizes appearance streams for markup annotations, so an
+/// AP-less /Highlight renders as nothing (Acrobat synthesizes at open; we do
+/// the same at render). Multiply-blend each highlight rect onto the bitmap.
+fn composite_highlights(page: &PdfPage, image: &mut image::DynamicImage) {
+    use image::{GenericImage, GenericImageView};
+
+    let w_pts = page.width().value;
+    let h_pts = page.height().value;
+    if w_pts <= 0.0 || h_pts <= 0.0 {
+        return;
+    }
+    let rotation = page.rotation().unwrap_or(PdfPageRenderRotation::None);
+    // width()/height() already reflect /Rotate; bounds are in UNROTATED space.
+    let (uw, uh) = match rotation {
+        PdfPageRenderRotation::Degrees90 | PdfPageRenderRotation::Degrees270 => (h_pts, w_pts),
+        _ => (w_pts, h_pts),
+    };
+    let scale = image.width() as f32 / w_pts;
+
+    for annot in page.annotations().iter() {
+        if annot.annotation_type() != PdfPageAnnotationType::Highlight {
+            continue;
+        }
+        let Ok(bounds) = annot.bounds() else { continue };
+        // NOTE: annot.fill_color() (FPDFAnnot_GetColor) access-violates here,
+        // so the highlight color is fixed to the app's marker yellow for now.
+        let color = PdfColor::new(255, 220, 60, 255);
+        let alpha = 0.45;
+
+        // Map unrotated PDF-space corners into bitmap pixels.
+        let map = |x: f32, y: f32| -> (f32, f32) {
+            match rotation {
+                PdfPageRenderRotation::None => (x * scale, (uh - y) * scale),
+                PdfPageRenderRotation::Degrees90 => (y * scale, x * scale),
+                PdfPageRenderRotation::Degrees180 => ((uw - x) * scale, y * scale),
+                PdfPageRenderRotation::Degrees270 => ((uh - y) * scale, (uw - x) * scale),
+            }
+        };
+        let (u1, v1) = map(bounds.left().value, bounds.bottom().value);
+        let (u2, v2) = map(bounds.right().value, bounds.top().value);
+        let (x0, x1) = (u1.min(u2).max(0.0) as u32, u1.max(u2).min(image.width() as f32) as u32);
+        let (y0, y1) = (v1.min(v2).max(0.0) as u32, v1.max(v2).min(image.height() as f32) as u32);
+
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let mut p = image.get_pixel(px, py);
+                for (c, tint) in [(0, color.red()), (1, color.green()), (2, color.blue())] {
+                    let base = p[c] as f32;
+                    let multiplied = base * tint as f32 / 255.0;
+                    p[c] = (base * (1.0 - alpha) + multiplied * alpha) as u8;
+                }
+                image.put_pixel(px, py, p);
+            }
+        }
+    }
 }
 
 fn page_text(docs: &HashMap<u32, OpenDoc>, id: u32, index: u16) -> Result<String, String> {
@@ -855,6 +914,40 @@ mod tests {
         // Delete the highlight; two remain.
         let annots = delete_annotation(&mut docs, reopened.id, 0, 0).unwrap();
         assert_eq!(annots.len(), 2);
+
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    /// A placed highlight must actually RENDER — PDFium doesn't synthesize
+    /// appearance streams, so this catches invisible-annotation regressions.
+    #[test]
+    fn highlight_renders_visibly() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+
+        let tmp = std::env::temp_dir().join("zugapdf-test-hl-render.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            doc.save_to_file(&tmp).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let yellow = Rgba { r: 255, g: 220, b: 60, a: 128 };
+        add_highlight(&mut docs, info.id, 0, 100.0, 700.0, 300.0, 720.0, yellow).unwrap();
+
+        let rendered = render_page(&docs, info.id, 0, 595, false).unwrap();
+        let b64 = rendered.data_url.split(',').nth(1).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
+
+        // A4 is 595x842pt rendered at 595px wide → 1px/pt. Sample inside the
+        // highlight rect (y flipped: pdf y=710 → px y=842-710=132).
+        let px = img.get_pixel(200, 132);
+        let is_yellowish = px[0] > 230 && px[1] > 200 && px[2] < 200;
+        assert!(is_yellowish, "highlight did not render: pixel at (200,132) = {px:?}");
 
         let _ = std::fs::remove_file(tmp);
     }
