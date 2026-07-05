@@ -35,3 +35,9 @@ tauri-plugin-dialog = "2.7.1"
 
 [features]
 dev-tools = ["dep:rand"]
+
+# Debug builds compile OUR crate unoptimized (fast iteration) but optimize all
+# dependencies — image/JPEG encoding is ~10x slower unoptimized, which made
+# every page re-render feel sluggish in dev.
+[profile.dev.package."*"]
+opt-level = 2
