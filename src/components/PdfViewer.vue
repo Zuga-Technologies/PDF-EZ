@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type SearchHit } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type SearchHit } from "../lib/api";
 
 interface RenderSlot {
   url: string | null;
@@ -47,6 +47,88 @@ interface DragState {
 const drag = ref<DragState | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
+
+// ---- form fill ----
+const fieldsByPage = ref<Map<number, FieldInfo[]>>(new Map());
+const fieldEditor = ref<{
+  page: number;
+  index: number;
+  value: string;
+  css: { left: number; top: number; width: number; height: number };
+} | null>(null);
+
+async function loadFields(index: number) {
+  if (!doc.value || fieldsByPage.value.has(index)) return;
+  try {
+    const fields = await api.listFormFields(doc.value.id, index);
+    if (fields.length) {
+      const next = new Map(fieldsByPage.value);
+      next.set(index, fields);
+      fieldsByPage.value = next;
+    } else {
+      fieldsByPage.value.set(index, []);
+    }
+  } catch {
+    /* non-fatal; page just shows without field tints */
+  }
+}
+
+function fieldCss(f: FieldInfo) {
+  const scale = POINTS_TO_CSS * zoom.value;
+  const pageH = doc.value!.pages[f.page].height;
+  return {
+    left: f.left * scale + "px",
+    top: (pageH - f.top) * scale + "px",
+    width: Math.max((f.right - f.left) * scale, 4) + "px",
+    height: Math.max((f.top - f.bottom) * scale, 4) + "px",
+  };
+}
+
+async function applyFieldValue(page: number, index: number, value: string) {
+  if (!doc.value) return;
+  try {
+    const fields = await api.setFormField(doc.value.id, page, index, value);
+    const next = new Map(fieldsByPage.value);
+    next.set(page, fields);
+    fieldsByPage.value = next;
+    dirty.value = true;
+    await refreshPage(page);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+function submitFieldEditor() {
+  const ed = fieldEditor.value;
+  fieldEditor.value = null;
+  if (ed) void applyFieldValue(ed.page, ed.index, ed.value);
+}
+
+/// Returns true if the click landed on a form field and was handled.
+function handleFieldClick(index: number, px: number, py: number, cssX: number, cssY: number): boolean {
+  const fields = fieldsByPage.value.get(index) ?? [];
+  const hit = fields.find(
+    (f) => px >= f.left && px <= f.right && py >= f.bottom && py <= f.top,
+  );
+  if (!hit) return false;
+  if (hit.kind === "Text") {
+    void cssX;
+    void cssY;
+    fieldEditor.value = {
+      page: index,
+      index: hit.index,
+      value: hit.value,
+      css: fieldCss(hit),
+    };
+  } else if (hit.kind === "Checkbox") {
+    void applyFieldValue(index, hit.index, hit.checked ? "false" : "true");
+  } else if (hit.kind === "RadioButton") {
+    void applyFieldValue(index, hit.index, "true");
+  } else {
+    return false; // combo/list not editable yet — fall through
+  }
+  return true;
+}
 
 // ---- text search ----
 const searchQuery = ref("");
@@ -168,6 +250,7 @@ async function renderSlot(slots: RenderSlot[], index: number, want: number, jpeg
 }
 
 function renderPageIfStale(index: number) {
+  void loadFields(index);
   const want = Math.round(cssWidth(index) * dpr());
   const slot = pages[index];
   if (slot && (!slot.url || slot.renderedWidth !== want)) {
@@ -209,6 +292,8 @@ function applyInfo(info: DocInfo) {
   }
   selected.value = new Set();
   selectedAnnot.value = null;
+  fieldEditor.value = null;
+  fieldsByPage.value = new Map();
   undoStack.length = 0; // annotation indices are stale after any page op
   // Already-visible elements get no new intersection event; refresh them.
   for (const index of visiblePages) renderPageIfStale(index);
@@ -399,6 +484,11 @@ async function selectAnnotAt(event: PointerEvent, index: number) {
   if (!doc.value) return;
   const [cssX, cssY] = pagePoint(event);
   const [px, py] = cssToPdf(index, cssX, cssY);
+  // Form fields take priority over annotation selection.
+  if (handleFieldClick(index, px, py, cssX, cssY)) {
+    selectedAnnot.value = null;
+    return;
+  }
   try {
     const annots = await api.listAnnotations(doc.value.id, index);
     const scale = POINTS_TO_CSS * zoom.value;
@@ -639,7 +729,7 @@ function zoomOut() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (noteDraft.value) return; // typing in the note box
+  if (noteDraft.value || fieldEditor.value) return; // typing in an overlay input
   if (e.ctrlKey && e.key.toLowerCase() === "f") {
     e.preventDefault();
     searchInput.value?.focus();
@@ -812,6 +902,28 @@ onBeforeUnmount(() => {
             <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
               <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
             </svg>
+
+            <template v-for="f in fieldsByPage.get(index) ?? []" :key="'f' + f.index">
+              <div
+                v-if="tool === 'select' && !(fieldEditor && fieldEditor.page === index && fieldEditor.index === f.index)"
+                class="field-tint"
+                :class="{ done: f.kind === 'Text' ? f.value.length > 0 : f.checked }"
+                :style="fieldCss(f)"
+                :title="f.name || f.kind"
+              ></div>
+            </template>
+
+            <input
+              v-if="fieldEditor && fieldEditor.page === index"
+              class="field-editor"
+              v-model="fieldEditor.value"
+              :style="fieldEditor.css"
+              autofocus
+              @pointerdown.stop
+              @keydown.enter.prevent="submitFieldEditor"
+              @keydown.escape="fieldEditor = null"
+              @blur="submitFieldEditor"
+            />
 
             <template v-for="(h, hi) in searchHits" :key="'s' + hi">
               <div
@@ -1034,6 +1146,25 @@ onBeforeUnmount(() => {
   padding: 0.3rem 0.6rem;
 }
 .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.field-tint {
+  position: absolute;
+  background: rgba(80, 130, 240, 0.16);
+  outline: 1px dashed rgba(80, 130, 240, 0.55);
+  border-radius: 2px;
+  cursor: text;
+  pointer-events: none;
+}
+.field-tint.done { background: rgba(80, 200, 130, 0.12); outline-color: rgba(80, 200, 130, 0.5); }
+.field-editor {
+  position: absolute;
+  z-index: 6;
+  font: inherit;
+  background: #fff;
+  color: #111;
+  border: 2px solid var(--accent);
+  border-radius: 2px;
+  padding: 0 0.2rem;
+}
 .search-hit {
   position: absolute;
   background: rgba(255, 150, 40, 0.35);

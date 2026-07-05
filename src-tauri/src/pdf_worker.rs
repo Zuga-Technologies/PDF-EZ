@@ -38,6 +38,22 @@ pub struct CompressOutcome {
 }
 
 #[derive(Serialize, Clone)]
+pub struct FieldInfo {
+    pub page: u16,
+    /// Index of the widget annotation hosting this field on its page.
+    pub index: u16,
+    /// "Text" | "Checkbox" | "RadioButton" | other (read-only in the UI)
+    pub kind: String,
+    pub name: String,
+    pub value: String,
+    pub checked: bool,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+#[derive(Serialize, Clone)]
 pub struct SearchHit {
     /// Matches sharing a hit number are one result spanning multiple lines.
     pub hit: u32,
@@ -124,6 +140,20 @@ pub enum PdfRequest {
         id: u32,
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
+    },
+    ListFormFields {
+        id: u32,
+        page: u16,
+        reply: Sender<Result<Vec<FieldInfo>, String>>,
+    },
+    /// Text fields: `value` is the new text. Checkboxes: "true"/"false".
+    /// Radio buttons: any value checks this widget's option.
+    SetFormField {
+        id: u32,
+        page: u16,
+        index: u16,
+        value: String,
+        reply: Sender<Result<Vec<FieldInfo>, String>>,
     },
     SearchDocument {
         id: u32,
@@ -304,6 +334,12 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path);
                         let _ = reply.send(result);
                     }
+                    PdfRequest::ListFormFields { id, page, reply } => {
+                        let _ = reply.send(list_form_fields(&docs, id, page));
+                    }
+                    PdfRequest::SetFormField { id, page, index, value, reply } => {
+                        let _ = reply.send(set_form_field(&mut docs, id, page, index, &value));
+                    }
                     PdfRequest::SearchDocument { id, query, match_case, reply } => {
                         let _ = reply.send(search_document(&docs, id, &query, match_case));
                     }
@@ -347,6 +383,8 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ListFormFields { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::SetFormField { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SearchDocument { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Compress { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::MergeAppend { reply, .. } => drop(reply.send(Err(e))),
@@ -643,6 +681,118 @@ fn save_doc(
         .map_err(|e| format!("Save failed: {e}"))?;
     entry.path = target;
     Ok(make_info(id, entry))
+}
+
+// ---- form fields ----
+
+fn field_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<FieldInfo>, String> {
+    let page = doc
+        .pages()
+        .get(page_index.into())
+        .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+    let mut out = Vec::new();
+    for (i, annot) in page.annotations().iter().enumerate() {
+        let Some(field) = annot.as_form_field() else { continue };
+        let bounds = annot.bounds().unwrap_or(PdfRect::ZERO);
+        let (kind, value, checked) = match field.field_type() {
+            PdfFormFieldType::Text => (
+                "Text",
+                field.as_text_field().and_then(|f| f.value()).unwrap_or_default(),
+                false,
+            ),
+            PdfFormFieldType::Checkbox => (
+                "Checkbox",
+                String::new(),
+                field.as_checkbox_field().and_then(|f| f.is_checked().ok()).unwrap_or(false),
+            ),
+            PdfFormFieldType::RadioButton => (
+                "RadioButton",
+                String::new(),
+                field.as_radio_button_field().and_then(|f| f.is_checked().ok()).unwrap_or(false),
+            ),
+            other => (
+                // Combo/list/button/signature: shown read-only for now.
+                match other {
+                    PdfFormFieldType::ComboBox => "ComboBox",
+                    PdfFormFieldType::ListBox => "ListBox",
+                    _ => "Other",
+                },
+                String::new(),
+                false,
+            ),
+        };
+        out.push(FieldInfo {
+            page: page_index,
+            index: i as u16,
+            kind: kind.to_string(),
+            name: field.name().unwrap_or_default(),
+            value,
+            checked,
+            left: bounds.left().value,
+            bottom: bounds.bottom().value,
+            right: bounds.right().value,
+            top: bounds.top().value,
+        });
+    }
+    Ok(out)
+}
+
+fn list_form_fields(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    page: u16,
+) -> Result<Vec<FieldInfo>, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+    field_infos(doc, page)
+}
+
+fn set_form_field(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    index: u16,
+    value: &str,
+) -> Result<Vec<FieldInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let mut annots = page.annotations_mut();
+        let mut annot = annots
+            .get(index.into())
+            .map_err(|e| format!("Field not found: {e}"))?;
+        let field = annot
+            .as_form_field_mut()
+            .ok_or("That annotation is not a form field")?;
+        match field.field_type() {
+            PdfFormFieldType::Text => {
+                field
+                    .as_text_field_mut()
+                    .ok_or("Not a text field")?
+                    .set_value(value)
+                    .map_err(|e| format!("Could not set value: {e}"))?;
+            }
+            PdfFormFieldType::Checkbox => {
+                field
+                    .as_checkbox_field_mut()
+                    .ok_or("Not a checkbox")?
+                    .set_checked(value == "true")
+                    .map_err(|e| format!("Could not toggle checkbox: {e}"))?;
+            }
+            PdfFormFieldType::RadioButton => {
+                field
+                    .as_radio_button_field_mut()
+                    .ok_or("Not a radio button")?
+                    .set_checked()
+                    .map_err(|e| format!("Could not select option: {e}"))?;
+            }
+            _ => return Err("This field type isn't editable yet".to_string()),
+        }
+    }
+    field_infos(&entry.doc, page_index)
 }
 
 const MAX_SEARCH_HITS: u32 = 500;
@@ -1127,6 +1277,51 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// Form fill: list fields, set text + checkbox, persist through save.
+    #[test]
+    fn form_fill_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Echo.pdf");
+        if !fixture.exists() {
+            eprintln!("Echo.pdf not generated — skipping");
+            return;
+        }
+        // Work on a copy so the fixture stays pristine.
+        let tmp = std::env::temp_dir().join("zugapdf-test-form.pdf");
+        std::fs::copy(&fixture, &tmp).unwrap();
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+
+        let fields = list_form_fields(&docs, info.id, 0).unwrap();
+        assert_eq!(fields.len(), 5, "3 text + 2 checkbox fields");
+        let text = fields.iter().find(|f| f.name == "full_name").unwrap();
+        assert_eq!(text.kind, "Text");
+        let check = fields.iter().find(|f| f.name == "agree_terms").unwrap();
+        assert_eq!(check.kind, "Checkbox");
+        assert!(!check.checked);
+
+        set_form_field(&mut docs, info.id, 0, text.index, "Buga Delgado").unwrap();
+        let fields = set_form_field(&mut docs, info.id, 0, check.index, "true").unwrap();
+        assert!(fields.iter().find(|f| f.name == "agree_terms").unwrap().checked);
+        assert_eq!(
+            fields.iter().find(|f| f.name == "full_name").unwrap().value,
+            "Buga Delgado"
+        );
+
+        // Persist and reopen.
+        save_doc(&mut docs, info.id, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let fields = list_form_fields(&docs, reopened.id, 0).unwrap();
+        assert_eq!(fields.iter().find(|f| f.name == "full_name").unwrap().value, "Buga Delgado");
+        assert!(fields.iter().find(|f| f.name == "agree_terms").unwrap().checked);
+
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// Search finds per-page hits with sane bounds in the Alpha fixture.

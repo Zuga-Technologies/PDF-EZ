@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
 use pdf_worker::{
-    AnnotInfo, CompressOutcome, DocInfo, PdfRequest, PdfWorkerHandle, RenderedPage, Rgba,
-    SearchHit,
+    AnnotInfo, CompressOutcome, DocInfo, FieldInfo, PdfRequest, PdfWorkerHandle, RenderedPage,
+    Rgba, SearchHit,
 };
 use tauri::Manager;
 
@@ -87,6 +87,26 @@ async fn save_document(
     path: Option<String>,
 ) -> Result<DocInfo, String> {
     engine_call(app, move |reply| PdfRequest::Save { id, path: path.map(PathBuf::from), reply }).await
+}
+
+#[tauri::command]
+async fn list_form_fields(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+) -> Result<Vec<FieldInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::ListFormFields { id, page, reply }).await
+}
+
+#[tauri::command]
+async fn set_form_field(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    index: u16,
+    value: String,
+) -> Result<Vec<FieldInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::SetFormField { id, page, index, value, reply }).await
 }
 
 #[tauri::command]
@@ -214,6 +234,8 @@ pub fn run() {
             save_document,
             compress_document,
             search_document,
+            list_form_fields,
+            set_form_field,
             merge_append,
             list_annotations,
             add_highlight,

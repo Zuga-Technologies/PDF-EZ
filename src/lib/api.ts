@@ -20,6 +20,19 @@ export interface RenderedPage {
   data_url: string;
 }
 
+export interface FieldInfo {
+  page: number;
+  index: number;
+  kind: string;
+  name: string;
+  value: string;
+  checked: boolean;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+
 export interface SearchHit {
   hit: number;
   page: number;
@@ -72,6 +85,10 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  listFormFields: (id: number, page: number) =>
+    invoke<FieldInfo[]>("list_form_fields", { id, page }),
+  setFormField: (id: number, page: number, index: number, value: string) =>
+    invoke<FieldInfo[]>("set_form_field", { id, page, index, value }),
   searchDocument: (id: number, query: string, matchCase: boolean) =>
     invoke<SearchHit[]>("search_document", { id, query, matchCase }),
   compressDocument: (id: number) =>
