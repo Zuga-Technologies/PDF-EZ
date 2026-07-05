@@ -98,6 +98,7 @@ export const api = {
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
   mergeAppend: (id: number, paths: string[]) =>
     invoke<DocInfo>("merge_append", { id, paths }),
+  ocrDocument: (id: number, dpi: number) => invoke<DocInfo>("ocr_document", { id, dpi }),
   exportPages: (id: number, dir: string, jpeg: boolean, dpi: number) =>
     invoke<number>("export_pages", { id, dir, jpeg, dpi }),
   exportText: (id: number, path: string) => invoke<number>("export_text", { id, path }),

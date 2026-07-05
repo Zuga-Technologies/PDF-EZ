@@ -211,6 +211,27 @@ watch(tool, (t) => {
   }
 });
 
+// ---- OCR ----
+const ocrOpen = ref(false);
+
+async function runOcr() {
+  if (!doc.value || busy.value) return;
+  ocrOpen.value = false;
+  busy.value = true;
+  error.value = null;
+  status.value = `Recognizing ${doc.value.page_count} ${doc.value.page_count === 1 ? "page" : "pages"}… (about a second per page)`;
+  try {
+    applyInfo(await api.ocrDocument(doc.value.id, 300));
+    dirty.value = true;
+    status.value = "Text recognized — try Ctrl+F, then Save to keep it";
+  } catch (e) {
+    status.value = null;
+    error.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 // ---- export & create ----
 const exportOpen = ref(false);
 const exportFormat = ref<"png" | "jpeg" | "txt">("png");
@@ -1216,6 +1237,25 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="ocrOpen && doc" class="protect-modal" @pointerdown.self="ocrOpen = false">
+      <div class="protect-card">
+        <h2>Recognize text (OCR)</h2>
+        <p class="protect-hint">
+          Makes scanned documents searchable: every page is re-rendered as a 300&nbsp;DPI image
+          with an invisible text layer (English). Highlights and form values are baked into the
+          image. Best for scans — on born-digital PDFs you'd lose editable text, so only run it
+          when search finds nothing.
+        </p>
+        <div class="protect-actions">
+          <button type="button" @click="ocrOpen = false">Cancel</button>
+          <span class="spacer"></span>
+          <button class="primary" :disabled="busy" @click="runOcr">
+            Recognize {{ doc.page_count }} {{ doc.page_count === 1 ? "page" : "pages" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div class="body">
       <aside v-if="toolsOpen" class="tools-panel">
         <p class="tools-title">All tools</p>
@@ -1246,7 +1286,10 @@ onBeforeUnmount(() => {
         <button class="tool-item" :disabled="busy" @click="createFromImages">
           <Icon name="image" /> Create from images
         </button>
-        <p class="tools-soon">Coming: Scan &amp; OCR · Redact · Sign</p>
+        <button class="tool-item" :disabled="!doc || busy" @click="ocrOpen = true">
+          <Icon name="scan-text" /> Scan &amp; OCR
+        </button>
+        <p class="tools-soon">Coming: Redact · Sign</p>
       </aside>
 
       <aside v-if="doc && railOpen" ref="rail" class="rail">

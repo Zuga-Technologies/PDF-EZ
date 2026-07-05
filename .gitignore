@@ -27,5 +27,6 @@ dist-ssr
 src-tauri/keys/license.key
 src-tauri/pdfium/
 src-tauri/qpdf/
+src-tauri/tesseract/
 *.lease
 

@@ -157,6 +157,13 @@ pub enum PdfRequest {
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
     },
+    /// OCR every page (Tesseract): pages are rasterized at the given DPI and
+    /// rebuilt with an invisible searchable text layer.
+    OcrDocument {
+        id: u32,
+        dpi: u16,
+        reply: Sender<Result<DocInfo, String>>,
+    },
     /// Render every page to PNG/JPEG files in a directory.
     ExportPages {
         id: u32,
@@ -364,6 +371,17 @@ fn find_qpdf(resource_dir: Option<&PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// Locate the bundled tesseract.exe (same convention as qpdf).
+fn find_tesseract(resource_dir: Option<&PathBuf>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(res) = resource_dir {
+        candidates.push(res.join("tesseract").join("tesseract.exe"));
+    }
+    candidates
+        .push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tesseract").join("tesseract.exe"));
+    candidates.into_iter().find(|p| p.exists())
+}
+
 pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
     let (tx, rx) = channel::<PdfRequest>();
 
@@ -371,6 +389,7 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
         .name("pdf-engine".into())
         .spawn(move || {
             let qpdf = find_qpdf(resource_dir.as_ref());
+            let tesseract = find_tesseract(resource_dir.as_ref());
             let pdfium: &'static Pdfium = match bind_pdfium(resource_dir) {
                 // Leak once: the engine lives for the whole app lifetime, and a
                 // 'static borrow lets us keep PdfDocument handles in the map.
@@ -423,6 +442,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                     PdfRequest::Save { id, path, reply } => {
                         let result = save_doc(pdfium, &mut docs, id, path, qpdf.as_deref());
                         let _ = reply.send(result);
+                    }
+                    PdfRequest::OcrDocument { id, dpi, reply } => {
+                        let _ = reply.send(ocr_document(pdfium, &mut docs, id, dpi, tesseract.as_deref()));
                     }
                     PdfRequest::ExportPages { id, dir, jpeg, dpi, reply } => {
                         let _ = reply.send(export_pages(&docs, id, &dir, jpeg, dpi));
@@ -508,6 +530,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SetDocumentPassword { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::OcrDocument { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ExportPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ExportText { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ImagesToPdf { reply, .. } => drop(reply.send(Err(e))),
@@ -980,6 +1003,95 @@ fn save_doc(
     entry.doc_password = None;
     entry.session_highlights.clear();
     entry.path = target;
+    Ok(make_info(id, entry))
+}
+
+// ---- OCR ----
+
+/// Rasterize each page, run Tesseract's searchable-PDF output on it, and
+/// rebuild the document from the per-page results. Pages become images with
+/// an invisible text layer — the standard treatment for scanned documents.
+fn ocr_document(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    dpi: u16,
+    tesseract: Option<&std::path::Path>,
+) -> Result<DocInfo, String> {
+    let tesseract = tesseract.ok_or("Tesseract OCR is not installed with this build")?;
+    let tessdata = tesseract.parent().map(|d| d.join("tessdata"));
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    let dpi = dpi.clamp(150, 600);
+    let stamp = std::process::id();
+
+    let mut page_pdfs: Vec<Vec<u8>> = Vec::new();
+    for (i, page) in entry.doc.pages().iter().enumerate() {
+        let width_px = (page.width().value * dpi as f32 / 72.0).round() as i32;
+        let config = PdfRenderConfig::new()
+            .set_target_width(width_px.clamp(64, 10_000))
+            .render_form_data(true)
+            .render_annotations(true);
+        let bitmap = page
+            .render_with_config(&config)
+            .map_err(|e| format!("Page {} render failed: {e}", i + 1))?;
+        let mut image = bitmap
+            .as_image()
+            .map_err(|e| format!("Page {} render failed: {e}", i + 1))?;
+        composite_highlights(&page, i as u16, &entry.session_highlights, &mut image);
+
+        let png = std::env::temp_dir().join(format!("zugapdf-ocr-{stamp}-{id}-{i}.png"));
+        let out_base = std::env::temp_dir().join(format!("zugapdf-ocr-{stamp}-{id}-{i}"));
+        image
+            .save_with_format(&png, image::ImageFormat::Png)
+            .map_err(|e| format!("Page {} OCR prep failed: {e}", i + 1))?;
+
+        let mut cmd = std::process::Command::new(tesseract);
+        cmd.arg(&png)
+            .arg(&out_base)
+            .arg("--dpi")
+            .arg(dpi.to_string())
+            .arg("-l")
+            .arg("eng")
+            .arg("pdf");
+        if let Some(td) = &tessdata {
+            cmd.env("TESSDATA_PREFIX", td);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let output = cmd.output().map_err(|e| format!("Could not run Tesseract: {e}"))?;
+        let _ = std::fs::remove_file(&png);
+        let page_pdf = out_base.with_extension("pdf");
+        if !output.status.success() || !page_pdf.exists() {
+            let _ = std::fs::remove_file(&page_pdf);
+            return Err(format!(
+                "OCR failed on page {}: {}",
+                i + 1,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let bytes = std::fs::read(&page_pdf).map_err(|e| format!("OCR read failed: {e}"))?;
+        let _ = std::fs::remove_file(&page_pdf);
+        page_pdfs.push(bytes);
+    }
+
+    // Rebuild the document from the per-page searchable PDFs.
+    let mut new_doc =
+        pdfium.create_new_pdf().map_err(|e| format!("OCR assembly failed: {e}"))?;
+    for (i, bytes) in page_pdfs.into_iter().enumerate() {
+        let part = pdfium
+            .load_pdf_from_byte_vec(bytes, None)
+            .map_err(|e| format!("OCR result for page {} failed to open: {e}", i + 1))?;
+        new_doc
+            .pages_mut()
+            .append(&part)
+            .map_err(|e| format!("OCR assembly failed on page {}: {e}", i + 1))?;
+    }
+    entry.doc = new_doc;
+    entry.doc_password = None;
+    entry.session_highlights.clear(); // annotations are baked into the raster
     Ok(make_info(id, entry))
 }
 
@@ -1978,6 +2090,85 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
             assert!(rendered.width_px > 0);
         }
+    }
+
+    /// OCR: an image-only (scanned-style) PDF has no searchable text; after
+    /// OCR the words are findable, and that survives save → reopen.
+    #[test]
+    fn ocr_makes_scanned_pdf_searchable() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let Some(_) = find_tesseract(None) else {
+            eprintln!("tesseract not fetched — skipping");
+            return;
+        };
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata").join("Alpha.pdf");
+        if !fixture.exists() {
+            return;
+        }
+
+        let _ = fixture;
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+
+        // Build a "scan": a page of normal-sized text rendered to an image,
+        // wrapped in an image-only PDF (no text layer).
+        let src = std::env::temp_dir().join("zugapdf-test-scan-text.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            let font = doc.fonts_mut().helvetica();
+            let mut page =
+                doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            for (i, line) in [
+                "The quick brown fox jumps over the lazy dog.",
+                "Invoices are due on the last day of the month.",
+                "Scanned documents become searchable after recognition.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut obj =
+                    PdfPageTextObject::new(&doc, *line, font, PdfPoints::new(18.0)).unwrap();
+                obj.translate(PdfPoints::new(60.0), PdfPoints::new(700.0 - 40.0 * i as f32))
+                    .unwrap();
+                page.objects_mut().add_text_object(obj).unwrap();
+            }
+            doc.save_to_file(&src).unwrap();
+        }
+        let info = open_doc(pdfium, &mut docs, &mut next_id, src.clone(), None).unwrap();
+        let png = std::env::temp_dir().join("zugapdf-test-scan-src.png");
+        {
+            let rendered = render_page(&docs, info.id, 0, 2480, false).unwrap(); // ~300dpi
+            let b64 = rendered.data_url.split(',').nth(1).unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+            std::fs::write(&png, bytes).unwrap();
+        }
+        let scan = std::env::temp_dir().join("zugapdf-test-scan.pdf");
+        images_to_pdf(pdfium, &[png.clone()], &scan).unwrap();
+        let _ = std::fs::remove_file(src);
+
+        let sinfo = open_doc(pdfium, &mut docs, &mut next_id, scan.clone(), None).unwrap();
+        assert!(
+            search_document(&docs, sinfo.id, "quick brown", false).unwrap().is_empty(),
+            "scan must start unsearchable"
+        );
+
+        let tesseract = find_tesseract(None);
+        let after = ocr_document(pdfium, &mut docs, sinfo.id, 300, tesseract.as_deref()).unwrap();
+        assert_eq!(after.page_count, 1);
+        let hits = search_document(&docs, sinfo.id, "quick brown fox", false).unwrap();
+        assert!(!hits.is_empty(), "OCR text layer must be searchable");
+
+        // Survives save → reopen.
+        save_doc(pdfium, &mut docs, sinfo.id, None, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, scan.clone(), None).unwrap();
+        assert!(
+            !search_document(&docs, reopened.id, "lazy dog", false).unwrap().is_empty()
+        );
+
+        let _ = std::fs::remove_file(png);
+        let _ = std::fs::remove_file(scan);
     }
 
     /// Export: pages → images on disk, text → .txt, images → new PDF.

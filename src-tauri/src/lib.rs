@@ -91,6 +91,11 @@ async fn save_document(
 }
 
 #[tauri::command]
+async fn ocr_document(app: tauri::AppHandle, id: u32, dpi: u16) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::OcrDocument { id, dpi, reply }).await
+}
+
+#[tauri::command]
 async fn export_pages(
     app: tauri::AppHandle,
     id: u32,
@@ -328,6 +333,7 @@ pub fn run() {
             set_document_password,
             add_watermark,
             add_header_footer,
+            ocr_document,
             export_pages,
             export_text,
             images_to_pdf,

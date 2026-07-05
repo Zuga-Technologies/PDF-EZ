@@ -28,7 +28,8 @@
     "targets": "all",
     "resources": {
       "pdfium/bin/pdfium.dll": "pdfium/bin/pdfium.dll",
-      "qpdf/bin/": "qpdf/bin/"
+      "qpdf/bin/": "qpdf/bin/",
+      "tesseract/": "tesseract/"
     },
     "icon": [
       "icons/32x32.png",
