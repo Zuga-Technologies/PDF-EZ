@@ -866,11 +866,43 @@ onBeforeUnmount(() => {
           Compress
         </button>
         <button
+          class="with-icon"
           :class="{ active: doc.has_password }"
           :disabled="busy"
           :title="doc.has_password ? 'Saves are encrypted (AES-256) — click to change/remove' : 'Password-protect this PDF'"
           @click="((protectOpen = !protectOpen), (protectError = null))"
-        >{{ doc.has_password ? "🔒 Protected" : "Protect…" }}</button>
+        >
+          <!-- Lucide "lock" / "lock-open" (ISC license) -->
+          <svg
+            v-if="doc.has_password"
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          <svg
+            v-else
+            class="icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+          </svg>
+          {{ doc.has_password ? "Protected" : "Protect…" }}
+        </button>
         <span class="divider"></span>
         <button
           :disabled="!selected.size || busy"
@@ -1271,6 +1303,16 @@ onBeforeUnmount(() => {
   padding: 0.3rem 0.6rem;
 }
 .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+button.with-icon .icon {
+  width: 0.95em;
+  height: 0.95em;
+  flex: none;
+}
 .protect-modal {
   position: fixed;
   inset: 0;
