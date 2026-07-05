@@ -31,6 +31,27 @@ pub struct DocInfo {
 }
 
 #[derive(Serialize, Clone)]
+pub struct AnnotInfo {
+    pub page: u16,
+    pub index: u16,
+    pub kind: String,
+    /// Bounds in PDF points, PDF coordinate space (origin bottom-left).
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+    pub contents: Option<String>,
+}
+
+#[derive(serde::Deserialize, Clone, Copy)]
+pub struct Rgba {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+#[derive(Serialize, Clone)]
 pub struct RenderedPage {
     pub index: u16,
     pub width_px: u32,
@@ -85,6 +106,45 @@ pub enum PdfRequest {
         id: u32,
         path: Option<PathBuf>,
         reply: Sender<Result<DocInfo, String>>,
+    },
+    ListAnnotations {
+        id: u32,
+        page: u16,
+        reply: Sender<Result<Vec<AnnotInfo>, String>>,
+    },
+    /// Rect in PDF points, PDF coordinate space.
+    AddHighlight {
+        id: u32,
+        page: u16,
+        left: f32,
+        bottom: f32,
+        right: f32,
+        top: f32,
+        color: Rgba,
+        reply: Sender<Result<Vec<AnnotInfo>, String>>,
+    },
+    AddNote {
+        id: u32,
+        page: u16,
+        x: f32,
+        y: f32,
+        contents: String,
+        reply: Sender<Result<Vec<AnnotInfo>, String>>,
+    },
+    AddInk {
+        id: u32,
+        page: u16,
+        /// Strokes of (x, y) PDF-point coordinates.
+        strokes: Vec<Vec<(f32, f32)>>,
+        color: Rgba,
+        width: f32,
+        reply: Sender<Result<Vec<AnnotInfo>, String>>,
+    },
+    DeleteAnnotation {
+        id: u32,
+        page: u16,
+        index: u16,
+        reply: Sender<Result<Vec<AnnotInfo>, String>>,
     },
 }
 
@@ -194,6 +254,21 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let result = save_doc(&mut docs, id, path);
                         let _ = reply.send(result);
                     }
+                    PdfRequest::ListAnnotations { id, page, reply } => {
+                        let _ = reply.send(list_annotations(&docs, id, page));
+                    }
+                    PdfRequest::AddHighlight { id, page, left, bottom, right, top, color, reply } => {
+                        let _ = reply.send(add_highlight(&mut docs, id, page, left, bottom, right, top, color));
+                    }
+                    PdfRequest::AddNote { id, page, x, y, contents, reply } => {
+                        let _ = reply.send(add_note(&mut docs, id, page, x, y, &contents));
+                    }
+                    PdfRequest::AddInk { id, page, strokes, color, width, reply } => {
+                        let _ = reply.send(add_ink(&mut docs, id, page, &strokes, color, width));
+                    }
+                    PdfRequest::DeleteAnnotation { id, page, index, reply } => {
+                        let _ = reply.send(delete_annotation(&mut docs, id, page, index));
+                    }
                 }
             }
         })
@@ -213,6 +288,11 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeletePages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ReorderPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::Save { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::ListAnnotations { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::AddHighlight { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::AddNote { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::AddInk { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::DeleteAnnotation { reply, .. } => drop(reply.send(Err(e))),
     }
 }
 
@@ -292,7 +372,8 @@ fn render_page(
     let width = target_width.clamp(64, 8192) as i32;
     let config = PdfRenderConfig::new()
         .set_target_width(width)
-        .render_form_data(true);
+        .render_form_data(true)
+        .render_annotations(true);
 
     let bitmap = page
         .render_with_config(&config)
@@ -443,19 +524,236 @@ fn save_doc(
     Ok(make_info(id, entry))
 }
 
+// ---- annotations ----
+
+fn annot_infos(doc: &PdfDocument<'static>, page_index: u16) -> Result<Vec<AnnotInfo>, String> {
+    let page = doc
+        .pages()
+        .get(page_index.into())
+        .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+    let mut out = Vec::new();
+    for (i, annot) in page.annotations().iter().enumerate() {
+        let bounds = annot.bounds().unwrap_or(PdfRect::ZERO);
+        out.push(AnnotInfo {
+            page: page_index,
+            index: i as u16,
+            kind: format!("{:?}", annot.annotation_type()),
+            left: bounds.left().value,
+            bottom: bounds.bottom().value,
+            right: bounds.right().value,
+            top: bounds.top().value,
+            contents: annot.contents(),
+        });
+    }
+    Ok(out)
+}
+
+fn list_annotations(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    page: u16,
+) -> Result<Vec<AnnotInfo>, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+    annot_infos(doc, page)
+}
+
+fn pdf_color(c: Rgba) -> PdfColor {
+    PdfColor::new(c.r, c.g, c.b, c.a)
+}
+
+fn add_highlight(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    left: f32,
+    bottom: f32,
+    right: f32,
+    top: f32,
+    color: Rgba,
+) -> Result<Vec<AnnotInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let rect = PdfRect::new(
+            PdfPoints::new(bottom),
+            PdfPoints::new(left),
+            PdfPoints::new(top),
+            PdfPoints::new(right),
+        );
+        let mut annot = page
+            .annotations_mut()
+            .create_highlight_annotation()
+            .map_err(|e| format!("Could not create highlight: {e}"))?;
+        annot.set_bounds(rect).map_err(|e| format!("Could not place highlight: {e}"))?;
+        annot
+            .attachment_points_mut()
+            .create_attachment_point_at_end(PdfQuadPoints::from_rect(&rect))
+            .map_err(|e| format!("Could not place highlight: {e}"))?;
+        annot
+            .set_fill_color(pdf_color(color))
+            .map_err(|e| format!("Could not color highlight: {e}"))?;
+    }
+    annot_infos(&entry.doc, page_index)
+}
+
+fn add_note(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    x: f32,
+    y: f32,
+    contents: &str,
+) -> Result<Vec<AnnotInfo>, String> {
+    const NOTE_SIZE: f32 = 22.0;
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let mut annot = page
+            .annotations_mut()
+            .create_text_annotation(contents)
+            .map_err(|e| format!("Could not create note: {e}"))?;
+        annot
+            .set_bounds(PdfRect::new(
+                PdfPoints::new(y - NOTE_SIZE),
+                PdfPoints::new(x),
+                PdfPoints::new(y),
+                PdfPoints::new(x + NOTE_SIZE),
+            ))
+            .map_err(|e| format!("Could not place note: {e}"))?;
+    }
+    annot_infos(&entry.doc, page_index)
+}
+
+fn add_ink(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    strokes: &[Vec<(f32, f32)>],
+    color: Rgba,
+    width: f32,
+) -> Result<Vec<AnnotInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    let strokes: Vec<&Vec<(f32, f32)>> = strokes.iter().filter(|s| s.len() >= 2).collect();
+    if strokes.is_empty() {
+        return Err("Ink stroke needs at least two points".to_string());
+    }
+
+    // Bounding rect over all strokes, padded by the stroke width.
+    let (mut l, mut b, mut r, mut t) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &(x, y) in strokes.iter().flat_map(|s| s.iter()) {
+        l = l.min(x);
+        b = b.min(y);
+        r = r.max(x);
+        t = t.max(y);
+    }
+    let pad = width.max(1.0);
+
+    let mut paths = Vec::new();
+    for stroke in &strokes {
+        let (x0, y0) = stroke[0];
+        let mut path = PdfPagePathObject::new(
+            &entry.doc,
+            PdfPoints::new(x0),
+            PdfPoints::new(y0),
+            Some(pdf_color(color)),
+            Some(PdfPoints::new(width)),
+            None,
+        )
+        .map_err(|e| format!("Could not start stroke: {e}"))?;
+        for &(x, y) in &stroke[1..] {
+            path.line_to(PdfPoints::new(x), PdfPoints::new(y))
+                .map_err(|e| format!("Could not draw stroke: {e}"))?;
+        }
+        paths.push(path);
+    }
+
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let mut annot = page
+            .annotations_mut()
+            .create_ink_annotation()
+            .map_err(|e| format!("Could not create ink annotation: {e}"))?;
+        annot
+            .set_bounds(PdfRect::new(
+                PdfPoints::new(b - pad),
+                PdfPoints::new(l - pad),
+                PdfPoints::new(t + pad),
+                PdfPoints::new(r + pad),
+            ))
+            .map_err(|e| format!("Could not place ink annotation: {e}"))?;
+        for path in paths {
+            annot
+                .objects_mut()
+                .add_path_object(path)
+                .map_err(|e| format!("Could not attach stroke: {e}"))?;
+        }
+    }
+    annot_infos(&entry.doc, page_index)
+}
+
+fn delete_annotation(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    page_index: u16,
+    index: u16,
+) -> Result<Vec<AnnotInfo>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    {
+        let mut page = entry
+            .doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let annot = page
+            .annotations()
+            .get(index.into())
+            .map_err(|e| format!("Annotation not found: {e}"))?;
+        page.annotations_mut()
+            .delete_annotation(annot)
+            .map_err(|e| format!("Could not delete annotation: {e}"))?;
+    }
+    annot_infos(&entry.doc, page_index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// PDFium is not thread-safe and must be initialized once: tests share a
+    /// single instance and serialize on this lock (cargo runs tests in
+    /// parallel threads by default — unguarded, the process crashes natively).
+    static PDFIUM: OnceLock<Option<&'static Pdfium>> = OnceLock::new();
+    static ENGINE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_pdfium() -> Option<&'static Pdfium> {
+        *PDFIUM.get_or_init(|| match bind_pdfium(None) {
+            Ok(p) => Some(Box::leak(Box::new(p))),
+            Err(_) => {
+                eprintln!("pdfium.dll not present — skipping engine test");
+                None
+            }
+        })
+    }
 
     /// End-to-end engine test against the real pdfium.dll: build a 3-page PDF,
     /// then rotate, reorder, delete, save, and re-open it.
     #[test]
     fn organize_roundtrip() {
-        let Ok(pdfium) = bind_pdfium(None) else {
-            eprintln!("pdfium.dll not present — skipping engine test");
-            return;
-        };
-        let pdfium: &'static Pdfium = Box::leak(Box::new(pdfium));
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
 
         // Three pages with distinct heights so order is observable.
         let tmp = std::env::temp_dir().join("zugapdf-test-organize.pdf");
@@ -508,6 +806,52 @@ mod tests {
         assert_eq!(heights, vec![700, 600]);
 
         drop(info);
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    /// Highlight + note + ink survive save → reopen, and delete works.
+    #[test]
+    fn annotations_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+
+        let tmp = std::env::temp_dir().join("zugapdf-test-annots.pdf");
+        {
+            let mut doc = pdfium.create_new_pdf().unwrap();
+            doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            doc.save_to_file(&tmp).unwrap();
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let yellow = Rgba { r: 255, g: 220, b: 60, a: 128 };
+
+        let annots =
+            add_highlight(&mut docs, info.id, 0, 100.0, 700.0, 300.0, 720.0, yellow).unwrap();
+        assert_eq!(annots.len(), 1);
+        assert_eq!(annots[0].kind, "Highlight");
+
+        let annots = add_note(&mut docs, info.id, 0, 50.0, 650.0, "hello from zugapdf").unwrap();
+        assert_eq!(annots.len(), 2);
+        assert_eq!(annots[1].contents.as_deref(), Some("hello from zugapdf"));
+
+        let stroke = vec![(120.0, 500.0), (180.0, 540.0), (240.0, 500.0)];
+        let annots = add_ink(&mut docs, info.id, 0, &[stroke], yellow, 2.0).unwrap();
+        assert_eq!(annots.len(), 3);
+        assert_eq!(annots[2].kind, "Ink");
+
+        // Persist and reopen: all three annotations must still be there.
+        save_doc(&mut docs, info.id, None).unwrap();
+        let reopened = open_doc(pdfium, &mut docs, &mut next_id, tmp.clone(), None).unwrap();
+        let annots = list_annotations(&docs, reopened.id, 0).unwrap();
+        assert_eq!(annots.len(), 3);
+        assert_eq!(annots[1].contents.as_deref(), Some("hello from zugapdf"));
+
+        // Delete the highlight; two remain.
+        let annots = delete_annotation(&mut docs, reopened.id, 0, 0).unwrap();
+        assert_eq!(annots.len(), 2);
+
         let _ = std::fs::remove_file(tmp);
     }
 }

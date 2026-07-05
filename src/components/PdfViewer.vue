@@ -27,6 +27,26 @@ const ZOOM_STEPS = [0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
 const POINTS_TO_CSS = 96 / 72;
 const THUMB_CSS_WIDTH = 132;
 
+// ---- annotation tools ----
+
+type Tool = "select" | "highlight" | "note" | "ink";
+const tool = ref<Tool>("select");
+const HIGHLIGHT_COLOR = { r: 255, g: 220, b: 60, a: 128 };
+const INK_COLOR = { r: 43, g: 74, b: 203, a: 255 };
+const INK_WIDTH_PT = 2;
+
+interface DragState {
+  page: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  points: [number, number][]; // ink trail, CSS px
+}
+const drag = ref<DragState | null>(null);
+const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
+const undoStack: { page: number; index: number }[] = [];
+
 const title = computed(() => {
   // Filename, always — PDF metadata titles are junk too often ("(anonymous)",
   // "Microsoft Word - final_v2.docx") to put in the toolbar.
@@ -150,6 +170,7 @@ function applyInfo(info: DocInfo) {
     thumbs.push({ url: null, renderedWidth: 0, loading: false });
   }
   selected.value = new Set();
+  undoStack.length = 0; // annotation indices are stale after any page op
   // Already-visible elements get no new intersection event; refresh them.
   for (const index of visiblePages) renderPageIfStale(index);
   for (const index of visibleThumbs) renderThumbIfStale(index);
@@ -259,6 +280,111 @@ function onDrop(dest: number) {
   void mutate(() => api.reorderPages(doc.value!.id, order));
 }
 
+// ---- annotation interactions ----
+
+function cssToPdf(index: number, cssX: number, cssY: number): [number, number] {
+  const scale = POINTS_TO_CSS * zoom.value;
+  const dims = doc.value!.pages[index];
+  return [cssX / scale, dims.height - cssY / scale];
+}
+
+function pagePoint(event: PointerEvent): [number, number] {
+  const el = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  return [
+    Math.min(Math.max(event.clientX - el.left, 0), el.width),
+    Math.min(Math.max(event.clientY - el.top, 0), el.height),
+  ];
+}
+
+function onPagePointerDown(event: PointerEvent, index: number) {
+  if (!doc.value || busy.value || tool.value === "select") return;
+  event.preventDefault();
+  const [x, y] = pagePoint(event);
+  if (tool.value === "note") {
+    noteDraft.value = { page: index, x, y, text: "" };
+    return;
+  }
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  drag.value = { page: index, startX: x, startY: y, x, y, points: [[x, y]] };
+}
+
+function onPagePointerMove(event: PointerEvent, index: number) {
+  if (!drag.value || drag.value.page !== index) return;
+  const [x, y] = pagePoint(event);
+  drag.value.x = x;
+  drag.value.y = y;
+  if (tool.value === "ink") drag.value.points.push([x, y]);
+}
+
+async function onPagePointerUp(index: number) {
+  const d = drag.value;
+  drag.value = null;
+  if (!d || d.page !== index || !doc.value) return;
+
+  if (tool.value === "highlight") {
+    const [x0, y0] = cssToPdf(index, Math.min(d.startX, d.x), Math.max(d.startY, d.y));
+    const [x1, y1] = cssToPdf(index, Math.max(d.startX, d.x), Math.min(d.startY, d.y));
+    if (Math.abs(x1 - x0) < 2 || Math.abs(y1 - y0) < 2) return; // accidental click
+    await addAnnotation(index, (id) =>
+      api.addHighlight(id, index, { left: x0, bottom: y0, right: x1, top: y1 }, HIGHLIGHT_COLOR),
+    );
+  } else if (tool.value === "ink") {
+    if (d.points.length < 2) return;
+    const stroke = d.points.map(([x, y]) => cssToPdf(index, x, y));
+    await addAnnotation(index, (id) => api.addInk(id, index, [stroke], INK_COLOR, INK_WIDTH_PT));
+  }
+}
+
+async function submitNote() {
+  const draft = noteDraft.value;
+  noteDraft.value = null;
+  if (!draft || !draft.text.trim() || !doc.value) return;
+  const [x, y] = cssToPdf(draft.page, draft.x, draft.y);
+  await addAnnotation(draft.page, (id) => api.addNote(id, draft.page, x, y, draft.text.trim()));
+}
+
+async function addAnnotation(
+  index: number,
+  op: (docId: number) => Promise<import("../lib/api").AnnotInfo[]>,
+) {
+  if (!doc.value) return;
+  try {
+    const annots = await op(doc.value.id);
+    if (annots.length) undoStack.push({ page: index, index: annots.length - 1 });
+    dirty.value = true;
+    refreshPage(index);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+async function undoAnnotation() {
+  const last = undoStack.pop();
+  if (!last || !doc.value) return;
+  try {
+    await api.deleteAnnotation(doc.value.id, last.page, last.index);
+    dirty.value = true;
+    refreshPage(last.page);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+function refreshPage(index: number) {
+  const page = pages[index];
+  if (page) {
+    page.url = null;
+    page.renderedWidth = 0;
+  }
+  const thumb = thumbs[index];
+  if (thumb) {
+    thumb.url = null;
+    thumb.renderedWidth = 0;
+  }
+  if (visiblePages.has(index)) renderPageIfStale(index);
+  if (visibleThumbs.has(index)) renderThumbIfStale(index);
+}
+
 // ---- save ----
 
 async function saveNow() {
@@ -305,9 +431,16 @@ function zoomOut() {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  if (noteDraft.value) return; // typing in the note box
   if (e.ctrlKey && e.key.toLowerCase() === "s") {
     e.preventDefault();
     e.shiftKey ? void saveAs() : void saveNow();
+  } else if (e.ctrlKey && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    void undoAnnotation();
+  } else if (e.key === "Escape") {
+    tool.value = "select";
+    drag.value = null;
   } else if (e.key === "Delete" && selected.value.size) {
     void deleteSelection();
   }
@@ -348,6 +481,13 @@ onBeforeUnmount(() => {
         <button :disabled="!selected.size || busy" title="Delete pages" @click="deleteSelection">
           Delete
         </button>
+        <span class="divider"></span>
+        <button :class="{ active: tool === 'highlight' }" title="Drag over text to highlight"
+          @click="tool = tool === 'highlight' ? 'select' : 'highlight'">Highlight</button>
+        <button :class="{ active: tool === 'note' }" title="Click the page to leave a note"
+          @click="tool = tool === 'note' ? 'select' : 'note'">Note</button>
+        <button :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)"
+          @click="tool = tool === 'ink' ? 'select' : 'ink'">Draw</button>
       </template>
       <div class="spacer"></div>
       <template v-if="doc">
@@ -408,11 +548,51 @@ onBeforeUnmount(() => {
             :key="index"
             :ref="(el) => observePage(el as Element | null, index)"
             class="page"
-            :class="{ selected: selected.has(index) }"
+            :class="{ selected: selected.has(index), annotating: tool !== 'select' }"
             :style="{ width: cssWidth(index) + 'px', height: cssHeight(index) + 'px' }"
+            @pointerdown="onPagePointerDown($event, index)"
+            @pointermove="onPagePointerMove($event, index)"
+            @pointerup="onPagePointerUp(index)"
           >
             <img v-if="page.url" :src="page.url" :alt="`Page ${index + 1}`" draggable="false" />
             <span v-else class="pagenum">{{ index + 1 }}</span>
+
+            <div
+              v-if="drag && drag.page === index && tool === 'highlight'"
+              class="live-highlight"
+              :style="{
+                left: Math.min(drag.startX, drag.x) + 'px',
+                top: Math.min(drag.startY, drag.y) + 'px',
+                width: Math.abs(drag.x - drag.startX) + 'px',
+                height: Math.abs(drag.y - drag.startY) + 'px',
+              }"
+            ></div>
+            <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
+              <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
+            </svg>
+
+            <form
+              v-if="noteDraft && noteDraft.page === index"
+              class="note-draft"
+              :style="{ left: noteDraft.x + 'px', top: noteDraft.y + 'px' }"
+              @submit.prevent="submitNote"
+              @pointerdown.stop
+            >
+              <textarea
+                v-model="noteDraft.text"
+                rows="3"
+                placeholder="Note text…"
+                autofocus
+                @keydown.enter.exact.prevent="submitNote"
+                @keydown.escape="noteDraft = null"
+              ></textarea>
+              <div class="note-actions">
+                <button type="button" @click="noteDraft = null">Cancel</button>
+                <button class="primary" type="submit" :disabled="!noteDraft.text.trim()">
+                  Add note
+                </button>
+              </div>
+            </form>
           </div>
         </template>
       </div>
@@ -509,11 +689,64 @@ onBeforeUnmount(() => {
 }
 .page {
   flex: none;
+  position: relative;
   background: #fff;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
   border-radius: 2px;
   display: grid;
   place-items: center;
+}
+.page.annotating { cursor: crosshair; }
+.page.annotating img { pointer-events: none; }
+.live-highlight {
+  position: absolute;
+  background: rgba(255, 220, 60, 0.4);
+  pointer-events: none;
+}
+.live-ink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.live-ink polyline {
+  fill: none;
+  stroke: #2b4acb;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.note-draft {
+  position: absolute;
+  z-index: 5;
+  background: var(--chrome);
+  border: 1px solid var(--chrome-line);
+  border-radius: 8px;
+  padding: 0.5rem;
+  width: 15rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.note-draft textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 0.85rem;
+  background: var(--chrome-raised);
+  color: var(--text);
+  border: 1px solid var(--chrome-line);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  resize: vertical;
+}
+.note-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+button.active {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .page.selected { outline: 3px solid var(--accent); }
 .page img {

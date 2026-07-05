@@ -20,6 +20,24 @@ export interface RenderedPage {
   data_url: string;
 }
 
+export interface AnnotInfo {
+  page: number;
+  index: number;
+  kind: string;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+  contents: string | null;
+}
+
+export interface Rgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
 export interface LicenseStatus {
   licensed: boolean;
   email: string | null;
@@ -43,6 +61,20 @@ export const api = {
     invoke<DocInfo>("reorder_pages", { id, order }),
   saveDocument: (id: number, path?: string) =>
     invoke<DocInfo>("save_document", { id, path: path ?? null }),
+  listAnnotations: (id: number, page: number) =>
+    invoke<AnnotInfo[]>("list_annotations", { id, page }),
+  addHighlight: (
+    id: number,
+    page: number,
+    rect: { left: number; bottom: number; right: number; top: number },
+    color: Rgba,
+  ) => invoke<AnnotInfo[]>("add_highlight", { id, page, ...rect, color }),
+  addNote: (id: number, page: number, x: number, y: number, contents: string) =>
+    invoke<AnnotInfo[]>("add_note", { id, page, x, y, contents }),
+  addInk: (id: number, page: number, strokes: [number, number][][], color: Rgba, width: number) =>
+    invoke<AnnotInfo[]>("add_ink", { id, page, strokes, color, width }),
+  deleteAnnotation: (id: number, page: number, index: number) =>
+    invoke<AnnotInfo[]>("delete_annotation", { id, page, index }),
   checkLicense: () => invoke<LicenseStatus>("check_license"),
   activateLicenseFile: (leasePath: string) =>
     invoke<LicenseStatus>("activate_license_file", { leasePath }),

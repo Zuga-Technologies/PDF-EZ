@@ -4,7 +4,7 @@ mod pdf_worker;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
-use pdf_worker::{DocInfo, PdfRequest, PdfWorkerHandle, RenderedPage};
+use pdf_worker::{AnnotInfo, DocInfo, PdfRequest, PdfWorkerHandle, RenderedPage, Rgba};
 use tauri::Manager;
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -87,6 +87,67 @@ async fn save_document(
 }
 
 #[tauri::command]
+async fn list_annotations(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+) -> Result<Vec<AnnotInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::ListAnnotations { id, page, reply }).await
+}
+
+#[tauri::command]
+async fn add_highlight(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    left: f32,
+    bottom: f32,
+    right: f32,
+    top: f32,
+    color: Rgba,
+) -> Result<Vec<AnnotInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::AddHighlight {
+        id, page, left, bottom, right, top, color, reply,
+    })
+    .await
+}
+
+#[tauri::command]
+async fn add_note(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    x: f32,
+    y: f32,
+    contents: String,
+) -> Result<Vec<AnnotInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::AddNote { id, page, x, y, contents, reply }).await
+}
+
+#[tauri::command]
+async fn add_ink(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    strokes: Vec<Vec<(f32, f32)>>,
+    color: Rgba,
+    width: f32,
+) -> Result<Vec<AnnotInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::AddInk { id, page, strokes, color, width, reply })
+        .await
+}
+
+#[tauri::command]
+async fn delete_annotation(
+    app: tauri::AppHandle,
+    id: u32,
+    page: u16,
+    index: u16,
+) -> Result<Vec<AnnotInfo>, String> {
+    engine_call(app, move |reply| PdfRequest::DeleteAnnotation { id, page, index, reply }).await
+}
+
+#[tauri::command]
 fn check_license(app: tauri::AppHandle) -> Result<license::LicenseStatus, String> {
     Ok(license::check(&app_data_dir(&app)?))
 }
@@ -118,6 +179,11 @@ pub fn run() {
             delete_pages,
             reorder_pages,
             save_document,
+            list_annotations,
+            add_highlight,
+            add_note,
+            add_ink,
+            delete_annotation,
             check_license,
             activate_license_file
         ])
