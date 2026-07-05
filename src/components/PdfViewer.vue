@@ -592,6 +592,8 @@ onBeforeUnmount(() => {
           Delete
         </button>
         <span class="divider"></span>
+        <button :class="{ active: tool === 'select' }" title="Click any highlight, note, or drawing to select and delete it (Esc)"
+          @click="((tool = 'select'), (selectedAnnot = null))">Select</button>
         <button :class="{ active: tool === 'highlight' }" title="Drag over text to highlight"
           @click="tool = tool === 'highlight' ? 'select' : 'highlight'">Highlight</button>
         <button :class="{ active: tool === 'note' }" title="Click the page to leave a note"

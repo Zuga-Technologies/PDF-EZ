@@ -831,6 +831,9 @@ mod tests {
             add_highlight(&mut docs, info.id, 0, 100.0, 700.0, 300.0, 720.0, yellow).unwrap();
         assert_eq!(annots.len(), 1);
         assert_eq!(annots[0].kind, "Highlight");
+        // Bounds feed the click-to-select hit test — assert, don't just create.
+        assert_eq!(annots[0].left as i32, 100);
+        assert_eq!(annots[0].top as i32, 720);
 
         let annots = add_note(&mut docs, info.id, 0, 50.0, 650.0, "hello from zugapdf").unwrap();
         assert_eq!(annots.len(), 2);
@@ -840,6 +843,7 @@ mod tests {
         let annots = add_ink(&mut docs, info.id, 0, &[stroke], yellow, 2.0).unwrap();
         assert_eq!(annots.len(), 3);
         assert_eq!(annots[2].kind, "Ink");
+        assert!(annots[2].right > annots[2].left && annots[2].top > annots[2].bottom);
 
         // Persist and reopen: all three annotations must still be there.
         save_doc(&mut docs, info.id, None).unwrap();
