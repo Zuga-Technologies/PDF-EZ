@@ -343,6 +343,18 @@ pub enum PdfRequest {
         rects: Vec<RedactRect>,
         reply: Sender<Result<Vec<ObjInfo>, String>>,
     },
+    /// PAdES B-B digital signature from a PKCS#12 (.pfx). Writes the signed PDF
+    /// to `out` and reloads it as the in-memory document.
+    SignDocument {
+        id: u32,
+        pfx_path: PathBuf,
+        password: String,
+        reason: String,
+        name: String,
+        location: String,
+        out: PathBuf,
+        reply: Sender<Result<DocInfo, String>>,
+    },
 }
 
 struct OpenDoc {
@@ -560,6 +572,14 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                     PdfRequest::RedactRegions { id, page, rects, reply } => {
                         let _ = reply.send(redact_regions(&mut docs, id, page, &rects));
                     }
+                    PdfRequest::SignDocument {
+                        id, pfx_path, password, reason, name, location, out, reply,
+                    } => {
+                        let _ = reply.send(sign_document(
+                            pdfium, &mut docs, id, &pfx_path, &password, &reason, &name,
+                            &location, out, qpdf.as_deref(),
+                        ));
+                    }
                 }
             }
         })
@@ -601,6 +621,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeleteAnnotation { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::FindPatterns { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::RedactRegions { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::SignDocument { reply, .. } => drop(reply.send(Err(e))),
     }
 }
 
@@ -2206,6 +2227,77 @@ fn find_patterns(
         }
     }
     Ok(out)
+}
+
+// ---- signing ----
+
+/// The current document as plain (decrypted, appearance-fixed) bytes — the same
+/// pipeline `save_doc` runs before it optionally re-encrypts.
+fn snapshot_plain_bytes(
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    qpdf: Option<&std::path::Path>,
+) -> Result<Vec<u8>, String> {
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    let stamp = std::process::id();
+    let temp1 = std::env::temp_dir().join(format!("zugapdf-sign-a-{stamp}-{id}.pdf"));
+    entry.doc.save_to_file(&temp1).map_err(|e| format!("Snapshot failed: {e}"))?;
+
+    let plain = if let Some(old) = &entry.doc_password {
+        let qpdf = qpdf.ok_or("qpdf is not installed — cannot sign an encrypted PDF")?;
+        let temp2 = std::env::temp_dir().join(format!("zugapdf-sign-b-{stamp}-{id}.pdf"));
+        let result = run_qpdf(
+            std::process::Command::new(qpdf)
+                .arg(format!("--password={old}"))
+                .arg("--decrypt")
+                .arg(&temp1)
+                .arg(&temp2),
+        );
+        let bytes = result.and_then(|_| std::fs::read(&temp2).map_err(|e| format!("Snapshot failed: {e}")));
+        let _ = std::fs::remove_file(&temp2);
+        bytes
+    } else {
+        std::fs::read(&temp1).map_err(|e| format!("Snapshot failed: {e}"))
+    };
+    let _ = std::fs::remove_file(&temp1);
+    Ok(crate::ap::fix_appearance_streams(plain?))
+}
+
+/// Sign the current document and write the result to `out`, then reload the
+/// signed PDF as the in-memory document. The signed output is unencrypted (a
+/// following qpdf pass would rewrite the file and break the byte range).
+#[allow(clippy::too_many_arguments)]
+fn sign_document(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    pfx_path: &std::path::Path,
+    password: &str,
+    reason: &str,
+    name: &str,
+    location: &str,
+    out: PathBuf,
+    qpdf: Option<&std::path::Path>,
+) -> Result<DocInfo, String> {
+    let plain = snapshot_plain_bytes(docs, id, qpdf)?;
+    let pfx = std::fs::read(pfx_path).map_err(|e| format!("Could not read the .pfx: {e}"))?;
+    let params = crate::sign::SignParams {
+        reason: reason.to_string(),
+        name: name.to_string(),
+        location: location.to_string(),
+    };
+    let signed = crate::sign::sign_pdf(plain, &pfx, password, &params)?;
+    std::fs::write(&out, &signed).map_err(|e| format!("Could not write the signed PDF: {e}"))?;
+
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    entry.doc = pdfium
+        .load_pdf_from_byte_vec(signed, None)
+        .map_err(|e| format!("Signed file failed to reload: {e}"))?;
+    entry.doc_password = None;
+    entry.save_password = None;
+    entry.session_highlights.clear();
+    entry.path = out;
+    Ok(make_info(id, entry))
 }
 
 #[cfg(test)]

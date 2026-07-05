@@ -132,6 +132,67 @@ function addChosenMatches() {
   status.value = `${pendingRedactions.value.length} region(s) marked — review, then Apply to remove`;
 }
 
+// ---- signing (PAdES B-B) ----
+const signOpen = ref(false);
+const signing = ref(false);
+const signPfxPath = ref("");
+const signPassword = ref("");
+const signReason = ref("");
+const signName = ref("");
+const signLocation = ref("");
+const signError = ref<string | null>(null);
+
+const signPfxName = computed(() => {
+  const p = signPfxPath.value;
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i >= 0 ? p.slice(i + 1) : p;
+});
+
+async function choosePfx() {
+  const picked = await open({
+    multiple: false,
+    filters: [{ name: "Digital ID", extensions: ["pfx", "p12"] }],
+  });
+  if (typeof picked === "string") signPfxPath.value = picked;
+}
+
+async function doSign() {
+  if (!doc.value || signing.value) return;
+  if (!signPfxPath.value) {
+    signError.value = "Choose a .pfx / .p12 digital ID first.";
+    return;
+  }
+  const suggested = doc.value.path.replace(/\.pdf$/i, "") + "-signed.pdf";
+  const out = await save({
+    defaultPath: suggested,
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!out) return;
+  signing.value = true;
+  signError.value = null;
+  try {
+    applyInfo(
+      await api.signDocument(
+        doc.value.id,
+        signPfxPath.value,
+        signPassword.value,
+        signReason.value,
+        signName.value,
+        signLocation.value,
+        out,
+      ),
+    );
+    dirty.value = false; // the signed file on disk is now the document
+    signOpen.value = false;
+    signPassword.value = "";
+    status.value = "Signed. The document is saved and cryptographically sealed.";
+  } catch (e) {
+    signError.value = String(e);
+  } finally {
+    signing.value = false;
+  }
+}
+
 async function applyRedactions() {
   if (!doc.value || busy.value || !pendingRedactions.value.length) return;
   const n = pendingRedactions.value.length;
@@ -1409,6 +1470,34 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="signOpen && doc" class="protect-modal" @pointerdown.self="signOpen = false">
+      <div class="protect-card scan-card">
+        <h2>Sign this PDF</h2>
+        <p class="protect-hint">
+          Adds a cryptographic PAdES signature from your digital ID (a
+          <code>.pfx</code> / <code>.p12</code> file). Signing happens entirely
+          on this machine — no timestamp server, no revocation lookup (those are
+          optional online steps you can add later). Editing the document after
+          signing will break the signature.
+        </p>
+        <button class="sign-pick" @click="choosePfx">
+          <Icon name="lock" /> {{ signPfxPath ? signPfxName : "Choose digital ID (.pfx)…" }}
+        </button>
+        <input v-model="signPassword" type="password" placeholder="Digital ID password" />
+        <input v-model="signName" type="text" placeholder="Name (optional)" />
+        <input v-model="signReason" type="text" placeholder="Reason, e.g. “I approve this document” (optional)" />
+        <input v-model="signLocation" type="text" placeholder="Location (optional)" />
+        <p v-if="signError" class="error">{{ signError }}</p>
+        <div class="protect-actions">
+          <button type="button" @click="signOpen = false">Cancel</button>
+          <span class="spacer"></span>
+          <button class="primary" :disabled="signing || !signPfxPath" @click="doSign">
+            {{ signing ? "Signing…" : "Sign &amp; save as…" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="tool === 'redact' && doc" class="redact-bar">
       <Icon name="square-dashed" />
       <span class="redact-msg">
@@ -1462,7 +1551,9 @@ onBeforeUnmount(() => {
           <Icon name="square-dashed" /> Redact
           <span v-if="tool === 'redact'" class="tool-state">on</span>
         </button>
-        <p class="tools-soon">Coming: Sign</p>
+        <button class="tool-item" :disabled="!doc || busy" @click="((signOpen = true), (signError = null))">
+          <Icon name="pen-tool" /> Sign
+        </button>
       </aside>
 
       <aside v-if="doc && railOpen" ref="rail" class="rail">
@@ -2072,6 +2163,17 @@ button.danger { color: var(--danger); }
   accent-color: var(--accent);
 }
 .scan-run { align-self: flex-start; }
+.sign-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  justify-content: flex-start;
+  padding: 0.45rem 0.6rem;
+  border: 1px dashed var(--chrome-line);
+  border-radius: 6px;
+  background: var(--chrome-raised);
+  color: var(--text);
+}
 .scan-results { border-top: 1px solid var(--chrome-line); padding-top: 0.5rem; }
 .scan-count { font-size: 0.8rem; color: var(--text-dim); margin: 0 0 0.4rem; }
 .scan-results ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }

@@ -34,6 +34,21 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 tauri-plugin-dialog = "2.7.1"
 lopdf = "0.43.0"
 regex = "1.11.1"
+# Digital signing (PAdES B-B) — pure-Rust RustCrypto 0.7-era stack, pinned to
+# one generation (der 0.7 / cms 0.2) so cert types pass cleanly between crates.
+p12-keystore = "0.2"
+cms = { version = "0.2.3", features = ["builder"] }
+x509-cert = { version = "0.2", features = ["builder"] }
+der = "0.7"
+spki = "0.7"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+signature = "2"
+const-oid = { version = "0.9", features = ["db"] }
+
+[dev-dependencies]
+# RSA 0.9 speaks rand_core 0.6 — match it for in-test key generation.
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [features]
 dev-tools = ["dep:rand"]

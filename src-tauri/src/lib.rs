@@ -1,6 +1,7 @@
 mod ap;
 mod license;
 mod pdf_worker;
+mod sign;
 
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
@@ -318,6 +319,30 @@ async fn redact_regions(
 }
 
 #[tauri::command]
+async fn sign_document(
+    app: tauri::AppHandle,
+    id: u32,
+    pfx_path: String,
+    password: String,
+    reason: String,
+    name: String,
+    location: String,
+    out: String,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::SignDocument {
+        id,
+        pfx_path: PathBuf::from(pfx_path),
+        password,
+        reason,
+        name,
+        location,
+        out: PathBuf::from(out),
+        reply,
+    })
+    .await
+}
+
+#[tauri::command]
 fn check_license(app: tauri::AppHandle) -> Result<license::LicenseStatus, String> {
     Ok(license::check(&app_data_dir(&app)?))
 }
@@ -371,6 +396,7 @@ pub fn run() {
             delete_annotation,
             find_patterns,
             redact_regions,
+            sign_document,
             check_license,
             activate_license_file
         ])

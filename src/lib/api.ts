@@ -161,6 +161,16 @@ export const api = {
     invoke<RedactMatch[]>("find_patterns", { id, kinds }),
   redactRegions: (id: number, page: number, rects: RedactRect[]) =>
     invoke<ObjInfo[]>("redact_regions", { id, page, rects }),
+  signDocument: (
+    id: number,
+    pfxPath: string,
+    password: string,
+    reason: string,
+    name: string,
+    location: string,
+    out: string,
+  ) =>
+    invoke<DocInfo>("sign_document", { id, pfxPath, password, reason, name, location, out }),
   checkLicense: () => invoke<LicenseStatus>("check_license"),
   activateLicenseFile: (leasePath: string) =>
     invoke<LicenseStatus>("activate_license_file", { leasePath }),
