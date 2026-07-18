@@ -725,10 +725,19 @@ const visibleThumbs = new Set<number>();
 let pageObserver: IntersectionObserver | null = null;
 let thumbObserver: IntersectionObserver | null = null;
 
+const pageEls = new Map<number, HTMLElement>();
 function observePage(el: Element | null, index: number) {
-  if (!el || !pageObserver) return;
+  if (!el) {
+    pageEls.delete(index);
+    return;
+  }
+  pageEls.set(index, el as HTMLElement);
+  if (!pageObserver) return;
   (el as HTMLElement).dataset.page = String(index);
   pageObserver.observe(el);
+}
+function scrollToPage(index: number) {
+  pageEls.get(index)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function observeThumb(el: Element | null, index: number) {
   if (!el || !thumbObserver) return;
@@ -895,6 +904,8 @@ function toggleSelect(index: number, event: MouseEvent) {
   } else {
     next.clear();
     next.add(index);
+    // Plain click = navigation too: bring that page into view.
+    scrollToPage(index);
   }
   selected.value = next;
 }
@@ -2150,16 +2161,21 @@ onBeforeUnmount(() => {
   gap: 0.6rem;
 }
 .thumb {
-  border-radius: 6px;
-  padding: 0.35rem 0.35rem 0.15rem;
-  border: 2px solid transparent;
+  border-radius: 8px;
+  padding: 0.4rem 0.4rem 0.1rem;
   cursor: pointer;
   text-align: center;
 }
-.thumb.selected { border-color: var(--accent); background: var(--chrome-raised); }
-.thumb.dragover { border-color: var(--ok); }
+.thumb:hover { background: var(--chrome-raised); }
+.thumb.selected { background: var(--chrome-raised); }
+/* The highlight is an even ring around the page image itself, not the
+   padded box — reads as "this page", not "this cell". */
+.thumb.selected .thumbpage { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thumb.dragover .thumbpage { outline: 2px solid var(--ok); outline-offset: 2px; }
+.thumb.selected .thumbnum { color: var(--accent); }
 .thumbpage {
   width: 132px;
+  margin: 0 auto;
   background: #fff;
   border-radius: 2px;
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
@@ -2170,6 +2186,7 @@ onBeforeUnmount(() => {
   font-family: var(--mono);
   font-size: 0.7rem;
   color: var(--text-dim);
+  line-height: 1.6;
 }
 .well {
   flex: 1;

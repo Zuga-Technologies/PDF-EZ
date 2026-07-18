@@ -1,0 +1,40 @@
+[package]
+name = "pdez-shellext"
+version = "0.1.0"
+description = "PD-EZ Explorer integration: PDF thumbnail provider + preview handler"
+edition = "2021"
+
+[lib]
+name = "pdez_shell"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "shelltest"
+path = "src/bin/shelltest.rs"
+
+[[bin]]
+name = "render_test"
+path = "src/bin/render_test.rs"
+
+[dependencies]
+pdfium-render = "0.9.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+windows-core = "0.58"
+windows = { version = "0.58", features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"

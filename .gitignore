@@ -29,4 +29,5 @@ src-tauri/pdfium/
 src-tauri/qpdf/
 src-tauri/tesseract/
 *.lease
+shellext/target/
 
