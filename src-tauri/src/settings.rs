@@ -9,6 +9,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// DigiCert's public RFC 3161 responder — free, unauthenticated, on both the
+/// Adobe AATL and Windows trusted-root lists. Editable in Settings so the
+/// user always knows (and can change) exactly what "Add trusted time" talks to.
+pub const DEFAULT_TSA_URL: &str = "http://timestamp.digicert.com";
+
+fn default_tsa_url() -> String {
+    DEFAULT_TSA_URL.to_string()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     /// Allow ONE outbound call to an RFC 3161 timestamp authority when signing
@@ -20,11 +29,19 @@ pub struct Settings {
     /// cryptography, and the certificate chain math.
     #[serde(default)]
     pub allow_online_verification: bool,
+    /// Which timestamp authority "Add trusted time" contacts. User-editable —
+    /// the network policy is every online action is named, never silent.
+    #[serde(default = "default_tsa_url")]
+    pub tsa_url: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { allow_trusted_timestamp: false, allow_online_verification: false }
+        Self {
+            allow_trusted_timestamp: false,
+            allow_online_verification: false,
+            tsa_url: default_tsa_url(),
+        }
     }
 }
 
@@ -62,9 +79,7 @@ pub fn save(dir: &Path, settings: &Settings) -> Result<Settings, String> {
 }
 
 /// The gate every online action must pass. Returns `Err` — blocking the call —
-/// unless the user has switched that feature on. No online feature exists yet;
-/// the timestamp and verification code paths will call this before they dial.
-#[allow(dead_code)]
+/// unless the user has switched that feature on.
 pub fn require(dir: &Path, feature: OnlineFeature) -> Result<(), String> {
     let s = load(dir);
     let allowed = match feature {

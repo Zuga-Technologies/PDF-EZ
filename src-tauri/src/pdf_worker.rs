@@ -107,6 +107,26 @@ pub struct RedactRect {
     pub top: f32,
 }
 
+/// One word-level change in a page's text, aligned to the other document's
+/// same-index page. "equal" runs are omitted from the wire payload — the UI
+/// only needs to render what changed.
+#[derive(Serialize, Clone)]
+pub struct DiffSegment {
+    /// "insert" | "delete"
+    pub op: String,
+    pub text: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PageDiff {
+    pub page: u16,
+    pub changed: bool,
+    /// Present only when `changed`; empty otherwise. A page that exists in
+    /// only one document (page counts differ) shows up here too — as one
+    /// big insert or delete segment spanning the whole page.
+    pub segments: Vec<DiffSegment>,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct AnnotInfo {
     pub page: u16,
@@ -204,6 +224,12 @@ pub enum PdfRequest {
         id: u32,
         path: PathBuf,
         reply: Sender<Result<u16, String>>,
+    },
+    /// Word-level, page-aligned text diff against another PDF on disk.
+    CompareDocuments {
+        id: u32,
+        other_path: PathBuf,
+        reply: Sender<Result<Vec<PageDiff>, String>>,
     },
     /// Build a new PDF from image files (one page per image).
     ImagesToPdf {
@@ -353,6 +379,14 @@ pub enum PdfRequest {
         name: String,
         location: String,
         out: PathBuf,
+        reply: Sender<Result<DocInfo, String>>,
+    },
+    /// Upgrade the document's existing PAdES B-B signature to B-T by fetching
+    /// an RFC 3161 timestamp token and embedding it as an unsigned CMS
+    /// attribute. The one and only network call the user opted into.
+    AddTrustedTimestamp {
+        id: u32,
+        tsa_url: String,
         reply: Sender<Result<DocInfo, String>>,
     },
 }
@@ -508,6 +542,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                     PdfRequest::ExportText { id, path, reply } => {
                         let _ = reply.send(export_text(&docs, id, &path));
                     }
+                    PdfRequest::CompareDocuments { id, other_path, reply } => {
+                        let _ = reply.send(compare_documents(pdfium, &docs, id, &other_path));
+                    }
                     PdfRequest::ImagesToPdf { paths, out, reply } => {
                         let _ = reply.send(images_to_pdf(pdfium, &paths, &out));
                     }
@@ -580,6 +617,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                             &location, out, qpdf.as_deref(),
                         ));
                     }
+                    PdfRequest::AddTrustedTimestamp { id, tsa_url, reply } => {
+                        let _ = reply.send(add_trusted_timestamp(pdfium, &mut docs, id, &tsa_url));
+                    }
                 }
             }
         })
@@ -603,6 +643,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::OcrDocument { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ExportPages { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ExportText { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::CompareDocuments { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::ImagesToPdf { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddWatermark { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddHeaderFooter { reply, .. } => drop(reply.send(Err(e))),
@@ -622,6 +663,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::FindPatterns { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::RedactRegions { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SignDocument { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::AddTrustedTimestamp { reply, .. } => drop(reply.send(Err(e))),
     }
 }
 
@@ -1225,6 +1267,53 @@ fn export_text(docs: &HashMap<u32, OpenDoc>, id: u32, path: &std::path::Path) ->
     }
     std::fs::write(path, out).map_err(|e| format!("Could not write file: {e}"))?;
     Ok(count as u16)
+}
+
+/// Word-level diff between this document's text and `other_path`'s, page by
+/// page (page `i` vs page `i` — most compares are draft-vs-final of the same
+/// document, so index alignment is the right default; no attempt to detect
+/// inserted/deleted whole pages by content matching). Pages beyond the
+/// shorter document diff against "", so an added/removed page shows as one
+/// big insert/delete segment rather than being silently skipped.
+fn compare_documents(
+    pdfium: &'static Pdfium,
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    other_path: &std::path::Path,
+) -> Result<Vec<PageDiff>, String> {
+    let entry = docs.get(&id).ok_or("Document is not open")?;
+    let other_bytes =
+        std::fs::read(other_path).map_err(|e| format!("Could not read the other PDF: {e}"))?;
+    let other = pdfium
+        .load_pdf_from_byte_vec(other_bytes, None)
+        .map_err(|e| format!("Could not open the other PDF: {e}"))?;
+
+    let page_text = |doc: &PdfDocument<'static>| -> Vec<String> {
+        doc.pages().iter().map(|p| p.text().map(|t| t.all()).unwrap_or_default()).collect()
+    };
+    let a_pages = page_text(&entry.doc);
+    let b_pages = page_text(&other);
+    let page_count = a_pages.len().max(b_pages.len());
+
+    let mut out = Vec::with_capacity(page_count);
+    for i in 0..page_count {
+        let a = a_pages.get(i).map(String::as_str).unwrap_or("");
+        let b = b_pages.get(i).map(String::as_str).unwrap_or("");
+        let diff = similar::TextDiff::from_words(a, b);
+        let mut segments = Vec::new();
+        let mut changed = false;
+        for change in diff.iter_all_changes() {
+            let op = match change.tag() {
+                similar::ChangeTag::Equal => continue,
+                similar::ChangeTag::Insert => "insert",
+                similar::ChangeTag::Delete => "delete",
+            };
+            changed = true;
+            segments.push(DiffSegment { op: op.to_string(), text: change.to_string() });
+        }
+        out.push(PageDiff { page: i as u16, changed, segments });
+    }
+    Ok(out)
 }
 
 fn images_to_pdf(
@@ -2300,6 +2389,29 @@ fn sign_document(
     Ok(make_info(id, entry))
 }
 
+/// Fetch an RFC 3161 timestamp for the document's existing signature and
+/// embed it in place, then reload. Caller must already have passed
+/// `settings::require(OnlineFeature::TrustedTimestamp)` — this function makes
+/// the network call unconditionally once invoked.
+fn add_trusted_timestamp(
+    pdfium: &'static Pdfium,
+    docs: &mut HashMap<u32, OpenDoc>,
+    id: u32,
+    tsa_url: &str,
+) -> Result<DocInfo, String> {
+    let entry = docs.get(&id).ok_or("Document is not open")?;
+    let path = entry.path.clone();
+    let bytes = std::fs::read(&path).map_err(|e| format!("Could not read the signed PDF: {e}"))?;
+    let timestamped = crate::timestamp::add_trusted_timestamp(bytes, tsa_url)?;
+    std::fs::write(&path, &timestamped).map_err(|e| format!("Could not write the timestamped PDF: {e}"))?;
+
+    let entry = docs.get_mut(&id).ok_or("Document is not open")?;
+    entry.doc = pdfium
+        .load_pdf_from_byte_vec(timestamped, None)
+        .map_err(|e| format!("Timestamped file failed to reload: {e}"))?;
+    Ok(make_info(id, entry))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2977,6 +3089,34 @@ mod tests {
 
         let _ = std::fs::remove_file(base);
         let _ = std::fs::remove_file(extra);
+    }
+
+    #[test]
+    fn compare_documents_roundtrip() {
+        let _guard = ENGINE_LOCK.lock().unwrap();
+        let Some(pdfium) = test_pdfium() else { return };
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("testdata");
+        let (alpha, bravo) = (dir.join("Alpha.pdf"), dir.join("Bravo.pdf"));
+        if !alpha.exists() || !bravo.exists() {
+            eprintln!("Alpha.pdf/Bravo.pdf not generated — skipping");
+            return;
+        }
+
+        let mut docs = HashMap::new();
+        let mut next_id = 1;
+        let info = open_doc(pdfium, &mut docs, &mut next_id, alpha.clone(), None).unwrap();
+
+        // A document compared with itself has no changes anywhere.
+        let self_diff = compare_documents(pdfium, &docs, info.id, &alpha).unwrap();
+        assert!(!self_diff.is_empty());
+        assert!(self_diff.iter().all(|p| !p.changed && p.segments.is_empty()));
+
+        // Compared with a different fixture, at least one page differs, and
+        // the changed page carries both the old and new text as segments.
+        let cross_diff = compare_documents(pdfium, &docs, info.id, &bravo).unwrap();
+        let changed_page = cross_diff.iter().find(|p| p.changed).expect("expected a changed page");
+        assert!(changed_page.segments.iter().any(|s| s.op == "delete" && s.text.contains("Alpha")));
+        assert!(changed_page.segments.iter().any(|s| s.op == "insert" && s.text.contains("Bravo")));
     }
 
     /// Manual verification helper: builds a highlighted+saved sample at a

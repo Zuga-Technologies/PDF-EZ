@@ -3,12 +3,13 @@ mod license;
 mod pdf_worker;
 mod settings;
 mod sign;
+mod timestamp;
 
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
 use pdf_worker::{
-    AnnotInfo, CompressOutcome, DocInfo, FieldInfo, ObjInfo, PdfRequest, PdfWorkerHandle,
+    AnnotInfo, CompressOutcome, DocInfo, FieldInfo, ObjInfo, PageDiff, PdfRequest, PdfWorkerHandle,
     RedactMatch, RedactRect, RenderedPage, Rgba, SearchHit,
 };
 use tauri::Manager;
@@ -113,6 +114,20 @@ async fn export_pages(
 async fn export_text(app: tauri::AppHandle, id: u32, path: String) -> Result<u16, String> {
     engine_call(app, move |reply| PdfRequest::ExportText { id, path: PathBuf::from(path), reply })
         .await
+}
+
+#[tauri::command]
+async fn compare_documents(
+    app: tauri::AppHandle,
+    id: u32,
+    other_path: String,
+) -> Result<Vec<PageDiff>, String> {
+    engine_call(app, move |reply| PdfRequest::CompareDocuments {
+        id,
+        other_path: PathBuf::from(other_path),
+        reply,
+    })
+    .await
 }
 
 #[tauri::command]
@@ -344,6 +359,14 @@ async fn sign_document(
 }
 
 #[tauri::command]
+async fn add_trusted_timestamp(app: tauri::AppHandle, id: u32) -> Result<DocInfo, String> {
+    let dir = app_data_dir(&app)?;
+    settings::require(&dir, settings::OnlineFeature::TrustedTimestamp)?;
+    let tsa_url = settings::load(&dir).tsa_url;
+    engine_call(app, move |reply| PdfRequest::AddTrustedTimestamp { id, tsa_url, reply }).await
+}
+
+#[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> Result<settings::Settings, String> {
     Ok(settings::load(&app_data_dir(&app)?))
 }
@@ -394,6 +417,7 @@ pub fn run() {
             ocr_document,
             export_pages,
             export_text,
+            compare_documents,
             images_to_pdf,
             compress_document,
             search_document,
@@ -411,6 +435,7 @@ pub fn run() {
             find_patterns,
             redact_regions,
             sign_document,
+            add_trusted_timestamp,
             get_settings,
             set_settings,
             check_license,

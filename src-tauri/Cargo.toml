@@ -45,6 +45,13 @@ rsa = { version = "0.9", features = ["sha2"] }
 sha2 = "0.10"
 signature = "2"
 const-oid = { version = "0.9", features = ["db"] }
+# RFC 3161 trusted timestamping (V1.X): the ONLY runtime HTTP client in the app,
+# used solely for the user-initiated [Add trusted time] action. rustls (not
+# native-tls) to stay off OpenSSL, matching the pure-Rust stack everywhere else.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Word-level text diff for document compare — Myers diff is a solved problem,
+# no reason to hand-roll it.
+similar = { version = "3", features = ["unicode"] }
 
 [dev-dependencies]
 # RSA 0.9 speaks rand_core 0.6 — match it for in-test key generation.

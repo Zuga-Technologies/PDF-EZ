@@ -337,12 +337,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
+/// Test-only fixtures shared across this crate's test modules (e.g.
+/// `timestamp.rs`'s tests need a signed PDF to timestamp).
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use der::asn1::OctetString;
     use rsa::pkcs8::EncodePrivateKey;
-    use rsa::traits::PublicKeyParts as _;
     use std::str::FromStr;
     use x509_cert::builder::{Builder, CertificateBuilder, Profile};
     use x509_cert::name::Name;
@@ -351,7 +351,7 @@ mod tests {
     use x509_cert::time::Validity;
 
     /// A throwaway self-signed RSA identity packaged as a PKCS#12.
-    fn make_test_pfx(password: &str) -> Vec<u8> {
+    pub(crate) fn make_test_pfx(password: &str) -> Vec<u8> {
         let mut rng = rand_core::OsRng;
         let key = RsaPrivateKey::new(&mut rng, 1024).unwrap(); // small = fast test
         let signer = SigningKey::<Sha256>::new(key.clone());
@@ -382,7 +382,7 @@ mod tests {
     }
 
     /// A minimal one-page PDF that lopdf can round-trip.
-    fn minimal_pdf() -> Vec<u8> {
+    pub(crate) fn minimal_pdf() -> Vec<u8> {
         use lopdf::dictionary;
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
@@ -408,6 +408,14 @@ mod tests {
         doc.save_to(&mut buf).unwrap();
         buf
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_support::{make_test_pfx, minimal_pdf};
+    use der::asn1::OctetString;
+    use rsa::traits::PublicKeyParts as _;
 
     fn hex_decode(hex: &[u8]) -> Vec<u8> {
         hex.chunks(2)
