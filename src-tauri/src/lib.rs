@@ -4,6 +4,7 @@ mod pdf_worker;
 mod settings;
 mod sign;
 mod timestamp;
+mod winsign;
 
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
@@ -347,8 +348,36 @@ async fn sign_document(
 ) -> Result<DocInfo, String> {
     engine_call(app, move |reply| PdfRequest::SignDocument {
         id,
-        pfx_path: PathBuf::from(pfx_path),
-        password,
+        identity: pdf_worker::SignIdentity::Pfx { path: PathBuf::from(pfx_path), password },
+        reason,
+        name,
+        location,
+        out: PathBuf::from(out),
+        reply,
+    })
+    .await
+}
+
+/// Certificates in CurrentUser\MY usable for signing (private key present,
+/// not expired). ECDSA certs are included but flagged un-signable this pass.
+#[tauri::command]
+fn list_windows_certs() -> Result<Vec<winsign::StoreCert>, String> {
+    winsign::list_certs()
+}
+
+#[tauri::command]
+async fn sign_document_store(
+    app: tauri::AppHandle,
+    id: u32,
+    thumbprint: String,
+    reason: String,
+    name: String,
+    location: String,
+    out: String,
+) -> Result<DocInfo, String> {
+    engine_call(app, move |reply| PdfRequest::SignDocument {
+        id,
+        identity: pdf_worker::SignIdentity::WindowsStore { thumbprint },
         reason,
         name,
         location,
@@ -445,6 +474,8 @@ pub fn run() {
             find_patterns,
             redact_regions,
             sign_document,
+            sign_document_store,
+            list_windows_certs,
             add_trusted_timestamp,
             get_settings,
             set_settings,

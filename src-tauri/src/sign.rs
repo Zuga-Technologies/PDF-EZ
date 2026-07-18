@@ -43,8 +43,7 @@ pub struct SignParams {
     pub location: String,
 }
 
-/// Sign `pdf` and return the signed bytes. `pfx`/`password` unlock the signing
-/// identity; `params` fills the human-readable signature-dictionary fields.
+/// Sign `pdf` with a PKCS#12 file identity and return the signed bytes.
 pub fn sign_pdf(
     pdf: Vec<u8>,
     pfx: &[u8],
@@ -56,8 +55,39 @@ pub fn sign_pdf(
         .map_err(|_| "Could not open the .pfx — wrong password or unsupported file".to_string())?;
     let (_, chain) = store.private_key_chain().ok_or("The .pfx has no private key")?;
     let signing_key = load_rsa_key(chain.key())?;
-    let certs = chain.chain();
-    let leaf_der = certs.first().ok_or("The .pfx has no certificate")?.as_der();
+    let chain_der: Vec<Vec<u8>> = chain.chain().iter().map(|c| c.as_der().to_vec()).collect();
+    if chain_der.is_empty() {
+        return Err("The .pfx has no certificate".to_string());
+    }
+    sign_pdf_with(pdf, &signing_key, &chain_der, params)
+}
+
+/// Sign `pdf` with a certificate from the Windows store (CNG). The private
+/// key never leaves Windows — TPM/smart-card keys never leave their hardware.
+pub fn sign_pdf_windows_store(
+    pdf: Vec<u8>,
+    thumbprint: &str,
+    params: &SignParams,
+) -> Result<Vec<u8>, String> {
+    let signer = crate::winsign::CngSigner::acquire(thumbprint)?;
+    let chain = signer.chain_der.clone();
+    sign_pdf_with(pdf, &signer, &chain, params)
+}
+
+/// Shared signing pipeline, generic over the signer. `chain_der` is the
+/// embedded certificate chain, leaf first.
+fn sign_pdf_with<S>(
+    pdf: Vec<u8>,
+    signer: &S,
+    chain_der: &[Vec<u8>],
+    params: &SignParams,
+) -> Result<Vec<u8>, String>
+where
+    S: signature::Signer<rsa::pkcs1v15::Signature>
+        + signature::Keypair
+        + spki::DynSignatureAlgorithmIdentifier,
+{
+    let leaf_der = chain_der.first().ok_or("No signing certificate")?;
     let leaf = Certificate::from_der(leaf_der).map_err(|e| format!("Certificate parse failed: {e}"))?;
 
     // ---- add the signature field, then serialize with placeholders ----
@@ -79,7 +109,7 @@ pub fn sign_pdf(
     let digest = hasher.finalize();
 
     // ---- CMS detached signature over that digest ----
-    let cms_der = build_cms(&signing_key, &leaf, certs, &digest)?;
+    let cms_der = build_cms(signer, &leaf, chain_der, &digest)?;
     let hex = hex_lower(&cms_der);
     let gap = gt - lt - 1; // hex characters available between the brackets
     if hex.len() > gap {
@@ -100,12 +130,17 @@ fn load_rsa_key(der: &[u8]) -> Result<SigningKey<Sha256>, String> {
     Ok(SigningKey::<Sha256>::new(key))
 }
 
-fn build_cms(
-    signing_key: &SigningKey<Sha256>,
+fn build_cms<S>(
+    signing_key: &S,
     leaf: &Certificate,
-    chain: &[p12_keystore::Certificate],
+    chain: &[Vec<u8>],
     digest: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, String>
+where
+    S: signature::Signer<rsa::pkcs1v15::Signature>
+        + signature::Keypair
+        + spki::DynSignatureAlgorithmIdentifier,
+{
     let sha256 = AlgorithmIdentifierOwned {
         oid: OID_SHA256.parse().map_err(|_| "bad sha256 oid")?,
         parameters: None,
@@ -127,7 +162,7 @@ fn build_cms(
         .map_err(|_| "Could not add digest algorithm".to_string())?;
     // Embed the full chain so a validator can build the path offline.
     for c in chain {
-        let cert = Certificate::from_der(c.as_der()).map_err(|e| format!("Certificate parse: {e}"))?;
+        let cert = Certificate::from_der(c).map_err(|e| format!("Certificate parse: {e}"))?;
         builder
             .add_certificate(CertificateChoices::Certificate(cert))
             .map_err(|_| "Could not embed a certificate".to_string())?;
@@ -379,6 +414,92 @@ pub(crate) mod test_support {
         );
         store.add_entry("test", p12_keystore::KeyStoreEntry::PrivateKeyChain(chain));
         store.writer(password).write().unwrap()
+    }
+
+    /// Full cryptographic verification of a signed PDF, self-contained: the
+    /// byte range must tile the file, the CMS must parse, messageDigest must
+    /// commit to the signed bytes, and the RSA signature over the signed
+    /// attributes must verify against the certificate EMBEDDED in the CMS.
+    /// Works for any signer (pfx or Windows store).
+    pub(crate) fn verify_signed_pdf(signed: &[u8]) {
+        use der::asn1::OctetString;
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use signature::Verifier;
+
+        fn hex_decode(hex: &[u8]) -> Vec<u8> {
+            hex.chunks(2)
+                .map(|c| {
+                    let hi = (c[0] as char).to_digit(16).unwrap();
+                    let lo = (c[1] as char).to_digit(16).unwrap();
+                    (hi * 16 + lo) as u8
+                })
+                .collect()
+        }
+        fn der_total_len(b: &[u8]) -> usize {
+            let first = b[1];
+            if first < 0x80 {
+                2 + first as usize
+            } else {
+                let n = (first & 0x7f) as usize;
+                let mut len = 0usize;
+                for i in 0..n {
+                    len = (len << 8) | b[2 + i] as usize;
+                }
+                2 + n + len
+            }
+        }
+
+        let key = find(signed, b"/ByteRange").unwrap();
+        let open = key + signed[key..].iter().position(|&b| b == b'[').unwrap();
+        let close = open + signed[open..].iter().position(|&b| b == b']').unwrap();
+        let text = std::str::from_utf8(&signed[open + 1..close]).unwrap();
+        let nums: Vec<usize> = text.split_whitespace().map(|n| n.parse().unwrap()).collect();
+        let (lt, gt) = (nums[1], nums[2] - 1);
+        assert_eq!(nums[0], 0);
+        assert_eq!(signed[lt], b'<');
+        assert_eq!(signed[gt], b'>');
+        assert_eq!(nums[2] + nums[3], signed.len(), "ranges must tile the file");
+
+        let der = hex_decode(&signed[lt + 1..gt]);
+        let ci = cms::content_info::ContentInfo::from_der(&der[..der_total_len(&der)]).unwrap();
+        let sd = ci.content.decode_as::<cms::signed_data::SignedData>().unwrap();
+        let si = sd.signer_infos.0.as_ref().iter().next().unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(&signed[0..lt]);
+        hasher.update(&signed[gt + 1..signed.len()]);
+        let expected = hasher.finalize();
+        let md_oid: der::asn1::ObjectIdentifier = "1.2.840.113549.1.9.4".parse().unwrap();
+        let attrs = si.signed_attrs.as_ref().expect("signed attrs present");
+        let md_attr = attrs.iter().find(|a| a.oid == md_oid).expect("messageDigest attr");
+        let md = md_attr.values.get(0).unwrap().decode_as::<OctetString>().unwrap();
+        assert_eq!(md.as_bytes(), &expected[..], "messageDigest must cover the signed bytes");
+
+        // Verify with the public key of the embedded signer certificate.
+        let certs = sd.certificates.as_ref().expect("certificates embedded");
+        let leaf = certs
+            .0
+            .iter()
+            .find_map(|c| match c {
+                cms::cert::CertificateChoices::Certificate(cert) => {
+                    let matches = match &si.sid {
+                        cms::signed_data::SignerIdentifier::IssuerAndSerialNumber(isn) => {
+                            isn.serial_number == cert.tbs_certificate.serial_number
+                        }
+                        _ => false,
+                    };
+                    matches.then_some(cert)
+                }
+                _ => None,
+            })
+            .expect("signer cert embedded in CMS");
+        use rsa::pkcs1::DecodeRsaPublicKey;
+        let spki_bytes =
+            leaf.tbs_certificate.subject_public_key_info.subject_public_key.as_bytes().unwrap();
+        let pubkey = rsa::RsaPublicKey::from_pkcs1_der(spki_bytes).unwrap();
+        let vk = VerifyingKey::<Sha256>::new(pubkey);
+        let sig = Signature::try_from(si.signature.as_bytes()).unwrap();
+        vk.verify(&attrs.to_der().unwrap(), &sig).expect("PKCS#7 signature must verify");
     }
 
     /// A minimal one-page PDF that lopdf can round-trip.

@@ -107,6 +107,17 @@ export interface Settings {
   tsa_url: string;
 }
 
+export interface StoreCert {
+  thumbprint: string;
+  subject: string;
+  issuer: string;
+  not_after: string;
+  algorithm: string;
+  provider: string;
+  tpm_backed: boolean;
+  rsa: boolean;
+}
+
 export interface LicenseStatus {
   licensed: boolean;
   email: string | null;
@@ -188,6 +199,16 @@ export const api = {
     out: string,
   ) =>
     invoke<DocInfo>("sign_document", { id, pfxPath, password, reason, name, location, out }),
+  listWindowsCerts: () => invoke<StoreCert[]>("list_windows_certs"),
+  signDocumentStore: (
+    id: number,
+    thumbprint: string,
+    reason: string,
+    name: string,
+    location: string,
+    out: string,
+  ) =>
+    invoke<DocInfo>("sign_document_store", { id, thumbprint, reason, name, location, out }),
   addTrustedTimestamp: (id: number) => invoke<DocInfo>("add_trusted_timestamp", { id }),
   compareDocuments: (id: number, otherPath: string) =>
     invoke<PageDiff[]>("compare_documents", { id, otherPath }),

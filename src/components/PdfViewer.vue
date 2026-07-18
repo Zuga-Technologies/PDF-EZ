@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type FieldInfo, type ObjInfo, type PageDiff, type RedactMatch, type SearchHit, type Settings } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type ObjInfo, type PageDiff, type RedactMatch, type SearchHit, type Settings, type StoreCert } from "../lib/api";
 import Icon from "./Icon.vue";
 
 interface RenderSlot {
@@ -168,6 +168,9 @@ async function toggleSetting(key: keyof Settings) {
 // ---- signing (PAdES B-B) ----
 const signOpen = ref(false);
 const signing = ref(false);
+const signSource = ref<"store" | "pfx">("pfx");
+const storeCerts = ref<StoreCert[]>([]);
+const storeThumbprint = ref("");
 const signPfxPath = ref("");
 const signPassword = ref("");
 const signReason = ref("");
@@ -183,6 +186,28 @@ const signPfxName = computed(() => {
   return i >= 0 ? p.slice(i + 1) : p;
 });
 
+function certLabel(c: StoreCert): string {
+  const badge = c.tpm_backed ? " · TPM" : "";
+  const alg = c.rsa ? "" : ` · ${c.algorithm} (not supported yet)`;
+  return `${c.subject || "(no name)"} · expires ${c.not_after}${badge}${alg}`;
+}
+
+// Opening the Sign panel refreshes the Windows store list; default to the
+// store when it has a usable cert (the zero-friction path).
+watch(signOpen, (isOpen) => {
+  if (!isOpen) return;
+  void api.listWindowsCerts().then((certs) => {
+    storeCerts.value = certs;
+    const usable = certs.filter((c) => c.rsa);
+    if (usable.length && !storeThumbprint.value) {
+      storeThumbprint.value = usable[0].thumbprint;
+      signSource.value = "store";
+    }
+  }).catch(() => {
+    storeCerts.value = [];
+  });
+});
+
 async function choosePfx() {
   const picked = await open({
     multiple: false,
@@ -193,8 +218,12 @@ async function choosePfx() {
 
 async function doSign() {
   if (!doc.value || signing.value) return;
-  if (!signPfxPath.value) {
+  if (signSource.value === "pfx" && !signPfxPath.value) {
     signError.value = "Choose a .pfx / .p12 digital ID first.";
+    return;
+  }
+  if (signSource.value === "store" && !storeThumbprint.value) {
+    signError.value = "Pick a certificate from the Windows store first.";
     return;
   }
   const suggested = doc.value.path.replace(/\.pdf$/i, "") + "-signed.pdf";
@@ -206,17 +235,26 @@ async function doSign() {
   signing.value = true;
   signError.value = null;
   try {
-    applyInfo(
-      await api.signDocument(
-        doc.value.id,
-        signPfxPath.value,
-        signPassword.value,
-        signReason.value,
-        signName.value,
-        signLocation.value,
-        out,
-      ),
-    );
+    const info =
+      signSource.value === "store"
+        ? await api.signDocumentStore(
+            doc.value.id,
+            storeThumbprint.value,
+            signReason.value,
+            signName.value,
+            signLocation.value,
+            out,
+          )
+        : await api.signDocument(
+            doc.value.id,
+            signPfxPath.value,
+            signPassword.value,
+            signReason.value,
+            signName.value,
+            signLocation.value,
+            out,
+          );
+    applyInfo(info);
     dirty.value = false; // the signed file on disk is now the document
     signOpen.value = false;
     signPassword.value = "";
@@ -1659,16 +1697,36 @@ onBeforeUnmount(() => {
       <div class="protect-card scan-card">
         <h2>Sign this PDF</h2>
         <p class="protect-hint">
-          Adds a cryptographic PAdES signature from your digital ID (a
-          <code>.pfx</code> / <code>.p12</code> file). Signing happens entirely
-          on this machine — no timestamp server, no revocation lookup (those are
-          optional online steps you can add later). Editing the document after
-          signing will break the signature.
+          Adds a cryptographic PAdES signature. Signing happens entirely on
+          this machine — with a Windows store certificate the private key never
+          leaves Windows (or the TPM/smart card it lives on). Editing the
+          document after signing will break the signature.
         </p>
-        <button class="sign-pick" @click="choosePfx">
-          <Icon name="lock" /> {{ signPfxPath ? signPfxName : "Choose digital ID (.pfx)…" }}
-        </button>
-        <input v-model="signPassword" type="password" placeholder="Digital ID password" />
+        <label class="sign-source">
+          <input v-model="signSource" type="radio" value="store" />
+          <span>Windows certificate store</span>
+        </label>
+        <select
+          v-if="signSource === 'store'"
+          v-model="storeThumbprint"
+          class="sign-cert"
+          :disabled="!storeCerts.length"
+        >
+          <option v-if="!storeCerts.length" value="">No certificates with a private key found</option>
+          <option v-for="c in storeCerts" :key="c.thumbprint" :value="c.thumbprint" :disabled="!c.rsa">
+            {{ certLabel(c) }}
+          </option>
+        </select>
+        <label class="sign-source">
+          <input v-model="signSource" type="radio" value="pfx" />
+          <span>Digital ID file (.pfx / .p12)</span>
+        </label>
+        <template v-if="signSource === 'pfx'">
+          <button class="sign-pick" @click="choosePfx">
+            <Icon name="lock" /> {{ signPfxPath ? signPfxName : "Choose digital ID (.pfx)…" }}
+          </button>
+          <input v-model="signPassword" type="password" placeholder="Digital ID password" />
+        </template>
         <input v-model="signName" type="text" placeholder="Name (optional)" />
         <input v-model="signReason" type="text" placeholder="Reason, e.g. “I approve this document” (optional)" />
         <input v-model="signLocation" type="text" placeholder="Location (optional)" />
@@ -1676,7 +1734,11 @@ onBeforeUnmount(() => {
         <div class="protect-actions">
           <button type="button" @click="signOpen = false">Cancel</button>
           <span class="spacer"></span>
-          <button class="primary" :disabled="signing || !signPfxPath" @click="doSign">
+          <button
+            class="primary"
+            :disabled="signing || (signSource === 'pfx' ? !signPfxPath : !storeThumbprint)"
+            @click="doSign"
+          >
             {{ signing ? "Signing…" : "Sign &amp; save as…" }}
           </button>
         </div>
@@ -2435,6 +2497,22 @@ button.danger { color: var(--danger); }
   justify-content: flex-start;
   padding: 0.45rem 0.6rem;
   border: 1px dashed var(--chrome-line);
+  border-radius: 6px;
+  background: var(--chrome-raised);
+  color: var(--text);
+}
+.sign-source {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.sign-source input { accent-color: var(--accent); }
+.sign-cert {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--chrome-line);
   border-radius: 6px;
   background: var(--chrome-raised);
   color: var(--text);

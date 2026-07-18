@@ -52,6 +52,11 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Word-level text diff for document compare — Myers diff is a solved problem,
 # no reason to hand-roll it.
 similar = { version = "3", features = ["unicode"] }
+# Windows certificate store signing (CNG): the key never leaves Windows/TPM.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
 
 [dev-dependencies]
 # RSA 0.9 speaks rand_core 0.6 — match it for in-test key generation.

@@ -369,12 +369,11 @@ pub enum PdfRequest {
         rects: Vec<RedactRect>,
         reply: Sender<Result<Vec<ObjInfo>, String>>,
     },
-    /// PAdES B-B digital signature from a PKCS#12 (.pfx). Writes the signed PDF
-    /// to `out` and reloads it as the in-memory document.
+    /// PAdES B-B digital signature. Writes the signed PDF to `out` and reloads
+    /// it as the in-memory document.
     SignDocument {
         id: u32,
-        pfx_path: PathBuf,
-        password: String,
+        identity: SignIdentity,
         reason: String,
         name: String,
         location: String,
@@ -610,11 +609,11 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                         let _ = reply.send(redact_regions(&mut docs, id, page, &rects));
                     }
                     PdfRequest::SignDocument {
-                        id, pfx_path, password, reason, name, location, out, reply,
+                        id, identity, reason, name, location, out, reply,
                     } => {
                         let _ = reply.send(sign_document(
-                            pdfium, &mut docs, id, &pfx_path, &password, &reason, &name,
-                            &location, out, qpdf.as_deref(),
+                            pdfium, &mut docs, id, identity, &reason, &name, &location, out,
+                            qpdf.as_deref(),
                         ));
                     }
                     PdfRequest::AddTrustedTimestamp { id, tsa_url, reply } => {
@@ -2352,6 +2351,15 @@ fn snapshot_plain_bytes(
     Ok(crate::ap::fix_appearance_streams(plain?))
 }
 
+/// How the user proves who they are when signing.
+pub enum SignIdentity {
+    /// A PKCS#12 (.pfx / .p12) file + password.
+    Pfx { path: PathBuf, password: String },
+    /// A certificate in the Windows store (CurrentUser\MY), by SHA-1 thumbprint.
+    /// The key stays inside Windows/TPM; only a sign operation is performed.
+    WindowsStore { thumbprint: String },
+}
+
 /// Sign the current document and write the result to `out`, then reload the
 /// signed PDF as the in-memory document. The signed output is unencrypted (a
 /// following qpdf pass would rewrite the file and break the byte range).
@@ -2360,8 +2368,7 @@ fn sign_document(
     pdfium: &'static Pdfium,
     docs: &mut HashMap<u32, OpenDoc>,
     id: u32,
-    pfx_path: &std::path::Path,
-    password: &str,
+    identity: SignIdentity,
     reason: &str,
     name: &str,
     location: &str,
@@ -2369,13 +2376,21 @@ fn sign_document(
     qpdf: Option<&std::path::Path>,
 ) -> Result<DocInfo, String> {
     let plain = snapshot_plain_bytes(docs, id, qpdf)?;
-    let pfx = std::fs::read(pfx_path).map_err(|e| format!("Could not read the .pfx: {e}"))?;
     let params = crate::sign::SignParams {
         reason: reason.to_string(),
         name: name.to_string(),
         location: location.to_string(),
     };
-    let signed = crate::sign::sign_pdf(plain, &pfx, password, &params)?;
+    let signed = match identity {
+        SignIdentity::Pfx { path, password } => {
+            let pfx =
+                std::fs::read(&path).map_err(|e| format!("Could not read the .pfx: {e}"))?;
+            crate::sign::sign_pdf(plain, &pfx, &password, &params)?
+        }
+        SignIdentity::WindowsStore { thumbprint } => {
+            crate::sign::sign_pdf_windows_store(plain, &thumbprint, &params)?
+        }
+    };
     std::fs::write(&out, &signed).map_err(|e| format!("Could not write the signed PDF: {e}"))?;
 
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
@@ -2746,7 +2761,14 @@ mod tests {
         let out = std::env::temp_dir().join("pdez-engine-signed.pdf");
         let qpdf = find_qpdf(None);
         let signed = sign_document(
-            pdfium, &mut docs, info.id, pfx, "test", "Approved", "Buga", "", out.clone(),
+            pdfium,
+            &mut docs,
+            info.id,
+            SignIdentity::Pfx { path: pfx.to_path_buf(), password: "test".to_string() },
+            "Approved",
+            "Buga",
+            "",
+            out.clone(),
             qpdf.as_deref(),
         )
         .unwrap();
