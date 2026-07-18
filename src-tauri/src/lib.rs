@@ -379,6 +379,16 @@ fn set_settings(
     settings::save(&app_data_dir(&app)?, &settings)
 }
 
+/// The PDF path Windows handed us via file association (double-click / "Open
+/// with"), if any. Association launches pass the document as the first argv.
+#[tauri::command]
+fn get_launch_file() -> Option<String> {
+    std::env::args().skip(1).find(|a| {
+        let p = std::path::Path::new(a);
+        p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) && p.is_file()
+    })
+}
+
 #[tauri::command]
 fn check_license(app: tauri::AppHandle) -> Result<license::LicenseStatus, String> {
     Ok(license::check(&app_data_dir(&app)?))
@@ -439,7 +449,8 @@ pub fn run() {
             get_settings,
             set_settings,
             check_license,
-            activate_license_file
+            activate_license_file,
+            get_launch_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running PD-EZ");

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type FieldInfo, type ObjInfo, type RedactMatch, type SearchHit, type Settings } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type ObjInfo, type PageDiff, type RedactMatch, type SearchHit, type Settings } from "../lib/api";
 import Icon from "./Icon.vue";
 
 interface RenderSlot {
@@ -137,7 +137,16 @@ const settingsOpen = ref(false);
 const settings = ref<Settings>({
   allow_trusted_timestamp: false,
   allow_online_verification: false,
+  tsa_url: "",
 });
+
+async function setTsaUrl(url: string) {
+  try {
+    settings.value = await api.setSettings({ ...settings.value, tsa_url: url });
+  } catch (e) {
+    error.value = String(e);
+  }
+}
 
 async function loadSettings() {
   try {
@@ -165,6 +174,8 @@ const signReason = ref("");
 const signName = ref("");
 const signLocation = ref("");
 const signError = ref<string | null>(null);
+const addingTimestamp = ref(false);
+const timestampError = ref<string | null>(null);
 
 const signPfxName = computed(() => {
   const p = signPfxPath.value;
@@ -214,6 +225,20 @@ async function doSign() {
     signError.value = String(e);
   } finally {
     signing.value = false;
+  }
+}
+
+async function doAddTrustedTimestamp() {
+  if (!doc.value || addingTimestamp.value) return;
+  addingTimestamp.value = true;
+  timestampError.value = null;
+  try {
+    applyInfo(await api.addTrustedTimestamp(doc.value.id));
+    status.value = "Trusted timestamp added — the signature now proves when it was made.";
+  } catch (e) {
+    timestampError.value = String(e);
+  } finally {
+    addingTimestamp.value = false;
   }
 }
 
@@ -1197,6 +1222,34 @@ async function compressDoc() {
   }
 }
 
+const compareOpen = ref(false);
+const compareBusy = ref(false);
+const compareError = ref<string | null>(null);
+const compareResult = ref<PageDiff[]>([]);
+const compareOtherName = ref("");
+
+async function doCompare() {
+  if (!doc.value || compareBusy.value) return;
+  const picked = await open({
+    title: "Compare against…",
+    filters: [{ name: "PDF documents", extensions: ["pdf"] }],
+    multiple: false,
+  });
+  if (typeof picked !== "string") return;
+  const i = Math.max(picked.lastIndexOf("/"), picked.lastIndexOf("\\"));
+  compareOtherName.value = i >= 0 ? picked.slice(i + 1) : picked;
+  compareBusy.value = true;
+  compareError.value = null;
+  compareOpen.value = true;
+  try {
+    compareResult.value = await api.compareDocuments(doc.value.id, picked);
+  } catch (e) {
+    compareError.value = String(e);
+  } finally {
+    compareBusy.value = false;
+  }
+}
+
 async function mergeFiles() {
   if (!doc.value || busy.value) return;
   const picked = await open({
@@ -1286,6 +1339,9 @@ onMounted(() => {
   thumbObserver = makeObserver(rail.value, visibleThumbs, renderThumbIfStale);
   window.addEventListener("keydown", onKeydown);
   void loadSettings();
+  void api.getLaunchFile().then((path) => {
+    if (path) void loadDocument(path);
+  });
 });
 
 onBeforeUnmount(() => {
@@ -1361,7 +1417,15 @@ onBeforeUnmount(() => {
           </label>
           <div class="net-copy">
             <strong>Trusted timestamp</strong>
-            <span>When signing, make one call to a timestamp authority so the signature proves <em>when</em> it was made (RFC&nbsp;3161). Off = self-asserted time only.</span>
+            <span>Lets the Sign panel's <em>Add trusted time</em> button make one call to a timestamp authority, proving <em>when</em> a signature was made (RFC&nbsp;3161). A signature is always valid without this — off means self-asserted time only.</span>
+            <label class="tsa-url">
+              Timestamp authority
+              <input
+                type="text"
+                :value="settings.tsa_url"
+                @change="setTsaUrl(($event.target as HTMLInputElement).value)"
+              />
+            </label>
           </div>
         </div>
         <div class="net-toggle">
@@ -1545,6 +1609,41 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="compareOpen" class="protect-modal" @pointerdown.self="compareOpen = false">
+      <div class="protect-card scan-card compare-card">
+        <h2>Compare with {{ compareOtherName }}</h2>
+        <p v-if="compareBusy" class="protect-hint">Reading both documents…</p>
+        <p v-else-if="compareError" class="error">{{ compareError }}</p>
+        <template v-else>
+          <p class="protect-hint">
+            {{ compareResult.filter((p) => p.changed).length }} of
+            {{ compareResult.length }} page(s) differ. Pages are compared by
+            position (page 1 vs page 1, and so on).
+          </p>
+          <div class="compare-pages">
+            <div v-for="p in compareResult.filter((p) => p.changed)" :key="p.page" class="compare-page">
+              <p class="compare-page-label">Page {{ p.page + 1 }}</p>
+              <p class="compare-text">
+                <span
+                  v-for="(s, i) in p.segments"
+                  :key="i"
+                  :class="s.op === 'insert' ? 'diff-insert' : 'diff-delete'"
+                  >{{ s.text }}</span
+                >
+              </p>
+            </div>
+            <p v-if="!compareResult.some((p) => p.changed)" class="scan-empty">
+              No differences found — the documents read identically.
+            </p>
+          </div>
+        </template>
+        <div class="protect-actions">
+          <span class="spacer"></span>
+          <button class="primary" @click="compareOpen = false">Close</button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="signOpen && doc" class="protect-modal" @pointerdown.self="signOpen = false">
       <div class="protect-card scan-card">
         <h2>Sign this PDF</h2>
@@ -1568,6 +1667,27 @@ onBeforeUnmount(() => {
           <span class="spacer"></span>
           <button class="primary" :disabled="signing || !signPfxPath" @click="doSign">
             {{ signing ? "Signing…" : "Sign &amp; save as…" }}
+          </button>
+        </div>
+        <hr />
+        <h2>Add trusted time</h2>
+        <p class="protect-hint">
+          Upgrades this document's existing signature to prove <em>when</em> it
+          was made (RFC&nbsp;3161), by contacting
+          <code>{{ settings.tsa_url }}</code> once. Works on a PDF that's
+          already signed — sign offline now, come back and add trusted time
+          whenever you're online. Requires the toggle in
+          <strong>Settings → Network &amp; privacy</strong> to be on.
+        </p>
+        <p v-if="timestampError" class="error">{{ timestampError }}</p>
+        <div class="protect-actions">
+          <span class="spacer"></span>
+          <button
+            class="primary"
+            :disabled="addingTimestamp || !settings.allow_trusted_timestamp"
+            @click="doAddTrustedTimestamp"
+          >
+            {{ addingTimestamp ? "Contacting timestamp authority…" : "Add trusted time" }}
           </button>
         </div>
       </div>
@@ -1628,6 +1748,9 @@ onBeforeUnmount(() => {
         </button>
         <button class="tool-item" :disabled="!doc || busy" @click="((signOpen = true), (signError = null))">
           <Icon name="pen-tool" /> Sign
+        </button>
+        <button class="tool-item" :disabled="!doc || busy" @click="doCompare">
+          <Icon name="diff" /> Compare with…
         </button>
       </aside>
 
@@ -2222,6 +2345,13 @@ button.danger { color: var(--danger); }
   font-weight: 600;
 }
 .scan-card { width: 27rem; max-height: 80vh; overflow-y: auto; }
+.compare-card { width: 34rem; }
+.compare-pages { display: flex; flex-direction: column; gap: 0.9rem; max-height: 60vh; overflow-y: auto; }
+.compare-page { border-top: 1px solid var(--chrome-line); padding-top: 0.5rem; }
+.compare-page-label { font-size: 0.78rem; color: var(--text-dim); margin: 0 0 0.3rem; }
+.compare-text { font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; margin: 0; }
+.diff-insert { background: color-mix(in srgb, #2ecc71 25%, transparent); }
+.diff-delete { background: color-mix(in srgb, #e74c3c 25%, transparent); text-decoration: line-through; }
 .scan-kinds { display: flex; flex-direction: column; gap: 0.3rem; }
 .scan-kinds label,
 .scan-results label {
@@ -2248,6 +2378,15 @@ button.danger { color: var(--danger); }
 .net-copy { display: flex; flex-direction: column; gap: 0.15rem; }
 .net-copy strong { font-size: 0.9rem; }
 .net-copy span { font-size: 0.78rem; color: var(--text-dim); line-height: 1.35; }
+.tsa-url {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-top: 0.3rem;
+}
+.tsa-url input { font-size: 0.78rem; padding: 0.25rem 0.4rem; }
 .net-foot { font-size: 0.75rem; color: var(--text-dim); margin: 0.3rem 0 0; }
 .switch { position: relative; flex: none; width: 2.4rem; height: 1.35rem; cursor: pointer; margin-top: 0.1rem; }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }

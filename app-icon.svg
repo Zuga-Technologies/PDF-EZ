@@ -1,0 +1,54 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a67ee"/>
+      <stop offset="0.55" stop-color="#2b4acb"/>
+      <stop offset="1" stop-color="#1c318f"/>
+    </linearGradient>
+    <linearGradient id="nib" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d5ae2"/>
+      <stop offset="1" stop-color="#1e35a8"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <!-- top sheen -->
+  <path d="M 264 64 h 496 c 110 0 200 90 200 200 v 120 c -280 90 -616 90 -896 0 v -120 c 0 -110 90 -200 200 -200 z" fill="url(#sheen)"/>
+
+  <!-- document sheet, soft drop shade -->
+  <rect x="322" y="248" width="400" height="560" rx="30" fill="#14257a" opacity="0.35"/>
+  <!-- sheet with folded top-right corner -->
+  <path d="M 312 266
+           a 28 28 0 0 1 28 -28
+           h 260
+           l 112 112
+           v 448
+           a 28 28 0 0 1 -28 28
+           h -344
+           a 28 28 0 0 1 -28 -28
+           z" fill="#fafcff"/>
+  <!-- dog-ear fold -->
+  <path d="M 600 238 l 112 112 h -84 a 28 28 0 0 1 -28 -28 z" fill="#c9d4f7"/>
+
+  <!-- text lines -->
+  <rect x="376" y="322" width="160" height="30" rx="15" fill="#c9d4f7"/>
+  <rect x="376" y="386" width="240" height="30" rx="15" fill="#dde5fa"/>
+
+  <!-- fountain-pen nib: dome top, wide shoulders, straight taper to a point -->
+  <path d="M 512 764
+           L 428 620
+           C 414 592 406 560 406 534
+           C 406 490 452 464 512 464
+           C 572 464 618 490 618 534
+           C 618 560 610 592 596 620
+           Z" fill="url(#nib)"/>
+  <!-- breather hole -->
+  <circle cx="512" cy="556" r="21" fill="#fafcff"/>
+  <!-- slit from hole to tip -->
+  <path d="M 506 576 L 518 576 L 514 742 L 510 742 Z" fill="#fafcff"/>
+</svg>

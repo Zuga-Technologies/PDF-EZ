@@ -26,6 +26,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDF Document",
+        "description": "PDF document",
+        "mimeType": "application/pdf",
+        "role": "Editor"
+      }
+    ],
     "resources": {
       "pdfium/bin/pdfium.dll": "pdfium/bin/pdfium.dll",
       "qpdf/bin/": "qpdf/bin/",

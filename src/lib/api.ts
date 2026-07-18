@@ -90,9 +90,21 @@ export interface RedactRect {
   top: number;
 }
 
+export interface DiffSegment {
+  op: "insert" | "delete";
+  text: string;
+}
+
+export interface PageDiff {
+  page: number;
+  changed: boolean;
+  segments: DiffSegment[];
+}
+
 export interface Settings {
   allow_trusted_timestamp: boolean;
   allow_online_verification: boolean;
+  tsa_url: string;
 }
 
 export interface LicenseStatus {
@@ -176,8 +188,12 @@ export const api = {
     out: string,
   ) =>
     invoke<DocInfo>("sign_document", { id, pfxPath, password, reason, name, location, out }),
+  addTrustedTimestamp: (id: number) => invoke<DocInfo>("add_trusted_timestamp", { id }),
+  compareDocuments: (id: number, otherPath: string) =>
+    invoke<PageDiff[]>("compare_documents", { id, otherPath }),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
+  getLaunchFile: () => invoke<string | null>("get_launch_file"),
   checkLicense: () => invoke<LicenseStatus>("check_license"),
   activateLicenseFile: (leasePath: string) =>
     invoke<LicenseStatus>("activate_license_file", { leasePath }),
