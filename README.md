@@ -3,7 +3,8 @@
 ![status](https://img.shields.io/badge/status-V1_IN_PROGRESS-blue)
 **Brand accent:** fountain-pen blue `#2b4acb` / `#7d95f2`
 
-Offline desktop PDF editor. **$4.99 one-time — pay once, own it forever.**
+Offline desktop PDF editor **and Typora-style Markdown editor**.
+**$4.99 one-time — pay once, own it forever.**
 No subscription, no account, no cloud: documents never leave the machine, and
 the license is verified by Ed25519 signature locally at startup, with zero
 network calls after the one-time activation.
@@ -11,7 +12,13 @@ network calls after the one-time activation.
 ## Architecture
 
 ```
-src/                Vue 3 + TypeScript + Vite frontend (viewer UI, license gate)
+src/                Vue 3 + TypeScript + Vite frontend (PDF viewer, Markdown
+                     editor, license gate); App.vue routes between the two by
+                     the opened file's extension
+  components/PdfViewer.vue       PDF viewer/editor UI
+  components/MarkdownEditor.vue  Tiptap-based WYSIWYG Markdown editor — no
+                                  visible `#`/`**` syntax while typing, reads
+                                  and writes plain .md text via tiptap-markdown
 src-tauri/          Tauri v2 shell, pure Rust (no sidecar runtime)
   src/pdf_worker.rs  Dedicated engine thread owning PDFium (not thread-safe) +
                      all open documents; commands talk to it over mpsc
@@ -19,11 +26,20 @@ src-tauri/          Tauri v2 shell, pure Rust (no sidecar runtime)
   src/bin/mint_lease.rs  Dev tool: mint signed leases (feature: dev-tools)
   pdfium/            pdfium.dll (fetched, not committed — BSD-3, non-V8 build)
   keys/license.pub   Embedded verify key (license.key = dev signer, gitignored)
+shellext/            Windows Explorer integration (pdez_shell.dll): thumbnails
+                     + preview pane for both .pdf and .md/.markdown. Both
+                     formats share the same two COM classes — Initialize()
+                     content-sniffs the stream (`%PDF-` header) and dispatches
+                     to the PDFium engine or to src/md_engine.rs, a lightweight
+                     GDI-based Markdown text rasterizer (pulldown-cmark parse +
+                     direct-to-DIB drawing, no browser engine involved).
 ```
 
-Engine: **PDFium** via `pdfium-render`. Write layer (planned per capability
-audit): `lopdf`, `qpdf`, `krilla`, Tesseract sidecar for OCR, CMS crates +
-Windows CNG for PAdES digital signatures.
+Engine: **PDFium** via `pdfium-render` for PDF. Write layer (planned per
+capability audit): `lopdf`, `qpdf`, `krilla`, Tesseract sidecar for OCR, CMS
+crates + Windows CNG for PAdES digital signatures. Markdown editing is
+**Tiptap** (ProseMirror) + `tiptap-markdown` in the frontend — the on-disk
+format is always plain Markdown text, Tiptap only owns the live editing view.
 
 ## Dev setup
 

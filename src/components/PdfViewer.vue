@@ -10,6 +10,9 @@ interface RenderSlot {
   loading: boolean;
 }
 
+const props = defineProps<{ openPath?: string }>();
+const emit = defineEmits<{ (e: "switch-kind", path: string): void }>();
+
 const doc = ref<DocInfo | null>(null);
 const toolsOpen = ref(true);
 const railOpen = ref(true);
@@ -893,11 +896,15 @@ async function confirmDiscard(): Promise<boolean> {
 async function openFile() {
   if (!(await confirmDiscard())) return;
   const path = await open({
-    title: "Open PDF",
-    filters: [{ name: "PDF documents", extensions: ["pdf"] }],
+    title: "Open document",
+    filters: [{ name: "Documents", extensions: ["pdf", "md", "markdown"] }],
     multiple: false,
   });
   if (typeof path !== "string") return;
+  if (/\.(md|markdown)$/i.test(path)) {
+    emit("switch-kind", path);
+    return;
+  }
   await loadDocument(path);
 }
 
@@ -1388,9 +1395,14 @@ onMounted(() => {
   thumbObserver = makeObserver(rail.value, visibleThumbs, renderThumbIfStale);
   window.addEventListener("keydown", onKeydown);
   void loadSettings();
-  void api.getLaunchFile().then((path) => {
-    if (path) void loadDocument(path);
-  });
+  if (props.openPath) {
+    if (/\.(md|markdown)$/i.test(props.openPath)) emit("switch-kind", props.openPath);
+    else void loadDocument(props.openPath);
+  } else {
+    void api.getLaunchFile().then((path) => {
+      if (path && /\.pdf$/i.test(path)) void loadDocument(path);
+    });
+  }
 });
 
 onBeforeUnmount(() => {

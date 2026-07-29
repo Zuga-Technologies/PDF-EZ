@@ -19,6 +19,9 @@ path = "src/bin/render_test.rs"
 [dependencies]
 pdfium-render = "0.9.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Markdown parsing for the Explorer thumbnail/preview rasterizer (md_engine) —
+# pure Rust, no C deps, matches the pure-Rust stance used elsewhere in PD-EZ.
+pulldown-cmark = { version = "0.12", default-features = false }
 windows-core = "0.58"
 windows = { version = "0.58", features = [
     "implement",

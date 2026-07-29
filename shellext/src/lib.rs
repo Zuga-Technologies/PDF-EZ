@@ -1,8 +1,12 @@
-//! pdez_shell.dll — PD-EZ's Explorer integration (PDF thumbnails + preview
-//! pane), rendered by the same PDFium build the app ships. Registered per-user
-//! by scripts/register-shellext.ps1.
+//! pdez_shell.dll — PD-EZ's Explorer integration (PDF + Markdown thumbnails
+//! and preview pane). PDF pages render via the same PDFium build the app
+//! ships; Markdown renders via a lightweight GDI text rasterizer (md_engine).
+//! Both document types share the same two COM classes — `Initialize()`
+//! content-sniffs the stream to decide which engine renders it. Registered
+//! per-user by scripts/register-shellext.ps1.
 
 pub mod engine;
+pub mod md_engine;
 pub mod preview;
 pub mod thumb;
 

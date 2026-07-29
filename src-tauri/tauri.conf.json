@@ -33,6 +33,13 @@
         "description": "PDF document",
         "mimeType": "application/pdf",
         "role": "Editor"
+      },
+      {
+        "ext": ["md", "markdown"],
+        "name": "Markdown Document",
+        "description": "Markdown document",
+        "mimeType": "text/markdown",
+        "role": "Editor"
       }
     ],
     "resources": {

@@ -89,8 +89,12 @@ impl IThumbnailProvider_Impl for ThumbProvider_Impl {
         pdwalpha: *mut WTS_ALPHATYPE,
     ) -> Result<()> {
         let data = self.data.borrow();
-        let (w, h, bgra) = engine::render_page_fit(&data, 0, cx, cx)
-            .map_err(|_| windows::core::Error::from(E_FAIL))?;
+        let (w, h, bgra) = if crate::md_engine::looks_like_pdf(&data) {
+            engine::render_page_fit(&data, 0, cx, cx)
+        } else {
+            crate::md_engine::render_markdown_fit(&data, cx, cx)
+        }
+        .map_err(|_| windows::core::Error::from(E_FAIL))?;
         let hbmp = bgra_to_hbitmap(w, h, &bgra)?;
         unsafe {
             *phbmp = hbmp;

@@ -408,14 +408,39 @@ fn set_settings(
     settings::save(&app_data_dir(&app)?, &settings)
 }
 
-/// The PDF path Windows handed us via file association (double-click / "Open
-/// with"), if any. Association launches pass the document as the first argv.
+/// The document path Windows handed us via file association (double-click /
+/// "Open with"), if any. Association launches pass the document as the first
+/// argv. Covers both document types PD-EZ opens (PDF, Markdown).
 #[tauri::command]
 fn get_launch_file() -> Option<String> {
     std::env::args().skip(1).find(|a| {
         let p = std::path::Path::new(a);
-        p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) && p.is_file()
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "pdf" | "md" | "markdown"))
+            && p.is_file()
     })
+}
+
+/// Read a Markdown file as UTF-8 text. Markdown documents are plain text, not
+/// PDFium-owned state, so they bypass the PDF engine thread entirely.
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+/// Base64-encoded file bytes, for embedding images the Markdown editor inserts
+/// as data URLs (the CSP's `img-src` allows `data:` but not `file:`).
+#[tauri::command]
+fn read_file_base64(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[tauri::command]
@@ -481,7 +506,10 @@ pub fn run() {
             set_settings,
             check_license,
             activate_license_file,
-            get_launch_file
+            get_launch_file,
+            read_text_file,
+            write_text_file,
+            read_file_base64
         ])
         .run(tauri::generate_context!())
         .expect("error while running PD-EZ");

@@ -76,7 +76,12 @@ impl PreviewHandler_Impl {
         if data.is_empty() {
             return;
         }
-        if let Ok((bw, bh, bgra)) = engine::render_page_fit(&data, 0, w, h) {
+        let rendered = if crate::md_engine::looks_like_pdf(&data) {
+            engine::render_page_fit(&data, 0, w, h)
+        } else {
+            crate::md_engine::render_markdown_fit(&data, w, h)
+        };
+        if let Ok((bw, bh, bgra)) = rendered {
             if let Ok(hbmp) = bgra_to_hbitmap(bw, bh, &bgra) {
                 self.swap_bitmap(hbmp);
             }

@@ -1,4 +1,4 @@
-# Register pdez_shell.dll (PDF thumbnails + preview pane) per-user.
+# Register pdez_shell.dll (PDF + Markdown thumbnails/preview pane) per-user.
 # Idempotent. Run after installing PD-EZ; -Unregister to remove.
 param([switch]$Unregister)
 
@@ -15,7 +15,8 @@ $classes = "HKCU:\Software\Classes"
 if ($Unregister) {
     foreach ($k in @(
         "$classes\CLSID\$thumbClsid", "$classes\CLSID\$prevClsid",
-        "$classes\PDF Document\shellex", "$classes\.pdf\shellex"
+        "$classes\PDF Document\shellex", "$classes\.pdf\shellex",
+        "$classes\Markdown Document\shellex", "$classes\.md\shellex", "$classes\.markdown\shellex"
     )) { Remove-Item $k -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\PreviewHandlers" `
         -Name $prevClsid -ErrorAction SilentlyContinue
@@ -35,11 +36,16 @@ foreach ($pair in @(@($thumbClsid, "PD-EZ Thumbnail Provider"), @($prevClsid, "P
 }
 # Preview handler runs in the prevhost surrogate
 Set-ItemProperty "$classes\CLSID\$prevClsid" -Name "AppID" -Value $prevHostAppId
-Set-ItemProperty "$classes\CLSID\$prevClsid" -Name "DisplayName" -Value "PD-EZ PDF Preview"
+Set-ItemProperty "$classes\CLSID\$prevClsid" -Name "DisplayName" -Value "PD-EZ Preview"
 
-# Hook both the PD-EZ ProgID and the bare extension, so previews work even
-# while another app still owns the .pdf default.
-foreach ($base in @("$classes\PDF Document", "$classes\.pdf")) {
+# Hook both each format's PD-EZ ProgID and its bare extension, so previews
+# work even while another app still owns the default for that extension. Both
+# document types share the same two CLSIDs — the DLL content-sniffs the
+# stream (md_engine::looks_like_pdf) to pick the right renderer.
+foreach ($base in @(
+    "$classes\PDF Document", "$classes\.pdf",
+    "$classes\Markdown Document", "$classes\.md", "$classes\.markdown"
+)) {
     New-Item "$base\shellex\$thumbShellex" -Force | Out-Null
     Set-ItemProperty "$base\shellex\$thumbShellex" -Name "(default)" -Value $thumbClsid
     New-Item "$base\shellex\$prevShellex" -Force | Out-Null
