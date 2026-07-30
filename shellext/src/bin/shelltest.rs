@@ -101,7 +101,7 @@ fn main() {
             let host = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("STATIC"),
-                w!("PD-EZ preview host"),
+                w!("PDF-EZ preview host"),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                 100,
                 100,

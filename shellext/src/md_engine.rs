@@ -26,7 +26,7 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 }
 
 const INK: (u8, u8, u8) = (42, 42, 40); // body text
-const ACCENT: (u8, u8, u8) = (0x2b, 0x4a, 0xcb); // headings — PD-EZ accent-ink
+const ACCENT: (u8, u8, u8) = (0x2b, 0x4a, 0xcb); // headings — PDF-EZ accent-ink
 const DIM: (u8, u8, u8) = (90, 87, 76); // quotes
 const PAPER: (u8, u8, u8) = (0xfb, 0xfa, 0xf7); // background, matches the in-app canvas
 const CODE_BG: (u8, u8, u8) = (0xef, 0xec, 0xe2);

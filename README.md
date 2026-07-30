@@ -1,4 +1,4 @@
-# PD-EZ
+# PDF-EZ
 
 ![status](https://img.shields.io/badge/status-V1_IN_PROGRESS-blue)
 **Brand accent:** fountain-pen blue `#2b4acb` / `#7d95f2`
@@ -61,18 +61,18 @@ Tests: `cargo test` (license signature round-trip lives in `license.rs`).
 
 `src-tauri/src/license.rs` implements offline Ed25519 lease verification, and
 it stays in the tree as a working reference for airgapped license checking.
-**It does not gate the application.** PD-EZ was briefly planned as a $4.99
+**It does not gate the application.** PDF-EZ was briefly planned as a $4.99
 one-time product; that was dropped in favor of Apache-2.0. Nothing is locked,
 nothing needs activating, and no key is required to build or run.
 
 ## Related
 
-- Capability audit + tier plan: PD-EZ scope-lock artifact (2026-07-05).
+- Capability audit + tier plan: PDF-EZ scope-lock artifact (2026-07-05).
 - Monorepo host: `E:\Programming` (this is an embedded studio repo).
 
 ## Redaction: read this before you rely on it
 
-PD-EZ redaction removes the underlying page objects rather than drawing a black
+PDF-EZ redaction removes the underlying page objects rather than drawing a black
 box over them, which is the correct approach and the one most cheap tools get
 wrong. It is still **not certified for legal, medical, or classified material.**
 No independent audit has been performed. If a failed redaction would cause real

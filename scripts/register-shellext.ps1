@@ -1,9 +1,9 @@
 # Register pdez_shell.dll (PDF + Markdown thumbnails/preview pane) per-user.
-# Idempotent. Run after installing PD-EZ; -Unregister to remove.
+# Idempotent. Run after installing PDF-EZ; -Unregister to remove.
 param([switch]$Unregister)
 
 $ErrorActionPreference = "Stop"
-$installDir = "$env:LOCALAPPDATA\PD-EZ"
+$installDir = "$env:LOCALAPPDATA\PDF-EZ"
 $dll = Join-Path $installDir "pdez_shell.dll"
 $thumbClsid = "{B7C0A2D4-8E11-4E5C-9F2A-01D6E4C3A9B1}"
 $prevClsid  = "{B7C0A2D4-8E11-4E5C-9F2A-01D6E4C3A9B2}"
@@ -27,7 +27,7 @@ if ($Unregister) {
 if (-not (Test-Path $dll)) { throw "$dll not found — build shellext and copy it there first" }
 
 # COM classes
-foreach ($pair in @(@($thumbClsid, "PD-EZ Thumbnail Provider"), @($prevClsid, "PD-EZ Preview Handler"))) {
+foreach ($pair in @(@($thumbClsid, "PDF-EZ Thumbnail Provider"), @($prevClsid, "PDF-EZ Preview Handler"))) {
     $clsid, $name = $pair
     New-Item "$classes\CLSID\$clsid\InprocServer32" -Force | Out-Null
     Set-ItemProperty "$classes\CLSID\$clsid" -Name "(default)" -Value $name
@@ -36,9 +36,9 @@ foreach ($pair in @(@($thumbClsid, "PD-EZ Thumbnail Provider"), @($prevClsid, "P
 }
 # Preview handler runs in the prevhost surrogate
 Set-ItemProperty "$classes\CLSID\$prevClsid" -Name "AppID" -Value $prevHostAppId
-Set-ItemProperty "$classes\CLSID\$prevClsid" -Name "DisplayName" -Value "PD-EZ Preview"
+Set-ItemProperty "$classes\CLSID\$prevClsid" -Name "DisplayName" -Value "PDF-EZ Preview"
 
-# Hook both each format's PD-EZ ProgID and its bare extension, so previews
+# Hook both each format's PDF-EZ ProgID and its bare extension, so previews
 # work even while another app still owns the default for that extension. Both
 # document types share the same two CLSIDs — the DLL content-sniffs the
 # stream (md_engine::looks_like_pdf) to pick the right renderer.
@@ -54,6 +54,6 @@ foreach ($base in @(
 
 New-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\PreviewHandlers" -Force | Out-Null
 Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\PreviewHandlers" `
-    -Name $prevClsid -Value "PD-EZ PDF Preview"
+    -Name $prevClsid -Value "PDF-EZ PDF Preview"
 
 Write-Host "registered $dll"

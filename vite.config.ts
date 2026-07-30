@@ -14,7 +14,7 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    // Port 3011 is allocated to PD-EZ in E:\Programming\PORT_REGISTRY.md
+    // Port 3011 is allocated to PDF-EZ in E:\Programming\PORT_REGISTRY.md
     port: 3011,
     strictPort: true,
     host: host || false,

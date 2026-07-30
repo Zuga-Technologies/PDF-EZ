@@ -10,8 +10,8 @@ const busy = ref(false);
 async function importLease() {
   error.value = null;
   const path = await open({
-    title: "Import PD-EZ license",
-    filters: [{ name: "PD-EZ license", extensions: ["lease"] }],
+    title: "Import PDF-EZ license",
+    filters: [{ name: "PDF-EZ license", extensions: ["lease"] }],
     multiple: false,
   });
   if (typeof path !== "string") return;
@@ -39,7 +39,7 @@ async function importLease() {
       </p>
       <div class="actions">
         <button class="primary" disabled title="Checkout launches with v1.0">
-          Buy PD-EZ — $4.99
+          Buy PDF-EZ — $4.99
         </button>
         <button :disabled="busy" @click="importLease">Import license file…</button>
       </div>

@@ -349,7 +349,7 @@ fn verifying_key_from_der(leaf_der: &[u8]) -> Result<rsa::pkcs1v15::VerifyingKey
     let spki = &cert.tbs_certificate.subject_public_key_info;
     if spki.algorithm.oid.to_string() != OID_RSA {
         return Err(
-            "This certificate uses an ECDSA key — PD-EZ signs with RSA store certificates for now"
+            "This certificate uses an ECDSA key — PDF-EZ signs with RSA store certificates for now"
                 .to_string(),
         );
     }
@@ -437,7 +437,7 @@ impl signature::Signer<rsa::pkcs1v15::Signature> for CngSigner {
 mod tests {
     use super::*;
 
-    /// Live end-to-end: for EVERY "PD-EZ CNG Test*" RSA cert in the store
+    /// Live end-to-end: for EVERY "PDF-EZ CNG Test*" RSA cert in the store
     /// (software-key and TPM-backed variants are minted by the test runner),
     /// sign a minimal PDF through the full store path and cryptographically
     /// verify the output. Skips silently when no test cert is present.
@@ -451,15 +451,15 @@ mod tests {
             }
         };
         let test_certs: Vec<_> =
-            certs.iter().filter(|c| c.subject.starts_with("PD-EZ CNG Test") && c.rsa).collect();
+            certs.iter().filter(|c| c.subject.starts_with("PDF-EZ CNG Test") && c.rsa).collect();
         if test_certs.is_empty() {
-            eprintln!("no PD-EZ CNG Test cert in CurrentUser\\MY — skipping");
+            eprintln!("no PDF-EZ CNG Test cert in CurrentUser\\MY — skipping");
             return;
         }
         for cert in test_certs {
             let params = crate::sign::SignParams {
                 reason: "CNG test".into(),
-                name: "PD-EZ".into(),
+                name: "PDF-EZ".into(),
                 location: "".into(),
             };
             let signed = crate::sign::sign_pdf_windows_store(

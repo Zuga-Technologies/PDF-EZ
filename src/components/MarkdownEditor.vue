@@ -90,7 +90,7 @@ const title = computed(() => {
 
 async function confirmDiscard(): Promise<boolean> {
   if (!dirty.value) return true;
-  return confirm("You have unsaved changes. Discard them?", { title: "PD-EZ", kind: "warning" });
+  return confirm("You have unsaved changes. Discard them?", { title: "PDF-EZ", kind: "warning" });
 }
 
 async function loadDocument(path: string) {

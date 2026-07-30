@@ -1,4 +1,4 @@
-//! pdez_shell.dll — PD-EZ's Explorer integration (PDF + Markdown thumbnails
+//! pdez_shell.dll — PDF-EZ's Explorer integration (PDF + Markdown thumbnails
 //! and preview pane). PDF pages render via the same PDFium build the app
 //! ships; Markdown renders via a lightweight GDI text rasterizer (md_engine).
 //! Both document types share the same two COM classes — `Initialize()`

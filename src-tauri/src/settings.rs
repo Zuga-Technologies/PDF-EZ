@@ -1,6 +1,6 @@
 //! User settings, persisted as `settings.json` in the app data directory.
 //!
-//! The whole point of this module is the network contract: PD-EZ is offline
+//! The whole point of this module is the network contract: PDF-EZ is offline
 //! by default and the ONLY features that may ever touch the network are the two
 //! flags below — both off until the user turns them on. Every online action
 //! must pass [`require`] first, so a feature can never quietly dial out.

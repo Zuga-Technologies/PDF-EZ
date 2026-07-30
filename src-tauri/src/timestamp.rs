@@ -277,7 +277,7 @@ mod tests {
         let pfx = make_test_pfx("zuga");
         let params = SignParams {
             reason: "Approved".to_string(),
-            name: "PD-EZ".to_string(),
+            name: "PDF-EZ".to_string(),
             location: "".to_string(),
         };
         let signed = sign_pdf(minimal_pdf(), &pfx, "zuga", &params).unwrap();

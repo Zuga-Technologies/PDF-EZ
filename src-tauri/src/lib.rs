@@ -410,7 +410,7 @@ fn set_settings(
 
 /// The document path Windows handed us via file association (double-click /
 /// "Open with"), if any. Association launches pass the document as the first
-/// argv. Covers both document types PD-EZ opens (PDF, Markdown).
+/// argv. Covers both document types PDF-EZ opens (PDF, Markdown).
 #[tauri::command]
 fn get_launch_file() -> Option<String> {
     std::env::args().skip(1).find(|a| {
@@ -512,5 +512,5 @@ pub fn run() {
             read_file_base64
         ])
         .run(tauri::generate_context!())
-        .expect("error while running PD-EZ");
+        .expect("error while running PDF-EZ");
 }

@@ -84,7 +84,7 @@ pub fn load_lease(app_data_dir: &Path) -> Option<Lease> {
 /// release builds enforce the lease.
 /// Report license state. **Never gates the app.**
 ///
-/// PD-EZ went Apache-2.0 (2026-07-30); the $4.99 SKU it was built for is gone.
+/// PDF-EZ went Apache-2.0 (2026-07-30); the $4.99 SKU it was built for is gone.
 /// `licensed` is unconditionally true so no build path can lock a user out.
 /// The Ed25519 verification below still runs and still reports what it found —
 /// it is kept as a working reference for offline lease checking, and deleting
@@ -176,7 +176,7 @@ mod tests {
 pub fn activate_from_file(app_data_dir: &Path, lease_file: &Path) -> Result<LicenseStatus, String> {
     let raw = fs::read_to_string(lease_file).map_err(|e| format!("could not read file: {e}"))?;
     let lease: Lease =
-        serde_json::from_str(&raw).map_err(|_| "not a valid PD-EZ license file".to_string())?;
+        serde_json::from_str(&raw).map_err(|_| "not a valid PDF-EZ license file".to_string())?;
     verify_lease(&lease)?;
     fs::create_dir_all(app_data_dir).map_err(|e| format!("could not store license: {e}"))?;
     fs::write(lease_path(app_data_dir), &raw).map_err(|e| format!("could not store license: {e}"))?;
