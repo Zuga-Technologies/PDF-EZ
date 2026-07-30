@@ -82,6 +82,13 @@ pub fn load_lease(app_data_dir: &Path) -> Option<Lease> {
 
 /// Startup check. Debug builds run unlicensed so development has zero friction;
 /// release builds enforce the lease.
+/// Report license state. **Never gates the app.**
+///
+/// PD-EZ went Apache-2.0 (2026-07-30); the $4.99 SKU it was built for is gone.
+/// `licensed` is unconditionally true so no build path can lock a user out.
+/// The Ed25519 verification below still runs and still reports what it found —
+/// it is kept as a working reference for offline lease checking, and deleting
+/// it would throw away the only part of this that was interesting.
 pub fn check(app_data_dir: &Path) -> LicenseStatus {
     match load_lease(app_data_dir) {
         Some(lease) => match verify_lease(&lease) {
@@ -92,17 +99,17 @@ pub fn check(app_data_dir: &Path) -> LicenseStatus {
                 reason: None,
             },
             Err(e) => LicenseStatus {
-                licensed: cfg!(debug_assertions),
+                licensed: true,
                 email: None,
                 dev_build: cfg!(debug_assertions),
                 reason: Some(e),
             },
         },
         None => LicenseStatus {
-            licensed: cfg!(debug_assertions),
+            licensed: true,
             email: None,
             dev_build: cfg!(debug_assertions),
-            reason: Some("no license on this machine".to_string()),
+            reason: None,
         },
     }
 }

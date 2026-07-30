@@ -4,10 +4,9 @@
 **Brand accent:** fountain-pen blue `#2b4acb` / `#7d95f2`
 
 Offline desktop PDF editor **and Typora-style Markdown editor**.
-**$4.99 one-time — pay once, own it forever.**
-No subscription, no account, no cloud: documents never leave the machine, and
-the license is verified by Ed25519 signature locally at startup, with zero
-network calls after the one-time activation.
+**Free and open source (Apache-2.0).**
+No subscription, no account, no cloud, no telemetry: documents never leave the
+machine, and the app makes zero network calls in normal use.
 
 ## Architecture
 
@@ -58,18 +57,29 @@ cargo run --features dev-tools --bin mint_lease -- you@example.com order-42
 
 Tests: `cargo test` (license signature round-trip lives in `license.rs`).
 
-## Release model
+## Licensing code (retained, not enforced)
 
-Polar.sh (merchant of record) checkout → purchase webhook mints an
-Ed25519-signed lease → app caches it → every startup verifies the signature
-locally. Import-from-file stays as the airgapped activation route. The
-production signing key never ships; only `keys/license.pub` is embedded.
+`src-tauri/src/license.rs` implements offline Ed25519 lease verification, and
+it stays in the tree as a working reference for airgapped license checking.
+**It does not gate the application.** PD-EZ was briefly planned as a $4.99
+one-time product; that was dropped in favor of Apache-2.0. Nothing is locked,
+nothing needs activating, and no key is required to build or run.
 
 ## Related
 
 - Capability audit + tier plan: PD-EZ scope-lock artifact (2026-07-05).
 - Monorepo host: `E:\Programming` (this is an embedded studio repo).
 
+## Redaction: read this before you rely on it
+
+PD-EZ redaction removes the underlying page objects rather than drawing a black
+box over them, which is the correct approach and the one most cheap tools get
+wrong. It is still **not certified for legal, medical, or classified material.**
+No independent audit has been performed. If a failed redaction would cause real
+harm in your situation, verify the output yourself before releasing it.
+
 ## License
 
-Proprietary — © Zuga Technologies. All rights reserved.
+Apache-2.0. See [LICENSE](LICENSE).
+
+PDFium is BSD-3-Clause and is fetched at build time, not vendored here.
