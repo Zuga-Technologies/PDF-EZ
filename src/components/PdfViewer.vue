@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type DocInfo, type FieldInfo, type ObjInfo, type PageDiff, type RedactMatch, type SearchHit, type Settings, type StoreCert } from "../lib/api";
+import { api, type DocInfo, type FieldInfo, type ObjInfo, type PageDiff, type RedactMatch, type RedactVerification, type SearchHit, type Settings, type StoreCert } from "../lib/api";
 import Icon from "./Icon.vue";
 
 interface RenderSlot {
@@ -80,6 +80,22 @@ interface PendingRedaction {
 }
 const pendingRedactions = ref<PendingRedaction[]>([]);
 const redactCount = computed(() => pendingRedactions.value.length);
+
+// Post-redaction report: what was deleted plus the engine's proof pass
+// (re-extraction under the applied rects + a fresh whole-document sweep).
+interface RedactReport {
+  removedText: number;
+  removedImages: number;
+  removedOther: number;
+  pages: number;
+  verify: RedactVerification | null;
+  verifyError: string | null;
+}
+const redactReport = ref<RedactReport | null>(null);
+const reportRemovedTotal = computed(() => {
+  const r = redactReport.value;
+  return r ? r.removedText + r.removedImages + r.removedOther : 0;
+});
 const redactScanOpen = ref(false);
 const scanning = ref(false);
 const redactKinds = reactive({ SSN: true, Email: true, Card: true, Phone: false });
@@ -294,22 +310,49 @@ async function applyRedactions() {
   busy.value = true;
   error.value = null;
   try {
+    const regions = [...pendingRedactions.value];
     const byPage = new Map<number, PendingRedaction[]>();
-    for (const r of pendingRedactions.value) {
+    for (const r of regions) {
       const list = byPage.get(r.page) ?? [];
       list.push(r);
       byPage.set(r.page, list);
     }
+    let removedText = 0;
+    let removedImages = 0;
+    let removedOther = 0;
     for (const [page, rects] of byPage) {
-      await api.redactRegions(
+      const out = await api.redactRegions(
         doc.value.id,
         page,
         rects.map((r) => ({ left: r.left, bottom: r.bottom, right: r.right, top: r.top })),
       );
+      removedText += out.removed_text;
+      removedImages += out.removed_images;
+      removedOther += out.removed_other;
     }
     pendingRedactions.value = [];
     dirty.value = true;
     for (const page of byPage.keys()) await refreshPage(page);
+
+    // Proof pass: re-check the exact regions just applied, and re-sweep the
+    // whole document for every pattern kind (broader than what was scanned —
+    // anything still present belongs in the report). A verify failure must not
+    // swallow the redaction result, so it is caught separately.
+    let verify: RedactVerification | null = null;
+    let verifyError: string | null = null;
+    try {
+      verify = await api.verifyRedactions(doc.value.id, regions, ["SSN", "Email", "Card", "Phone"]);
+    } catch (e) {
+      verifyError = String(e);
+    }
+    redactReport.value = {
+      removedText,
+      removedImages,
+      removedOther,
+      pages: byPage.size,
+      verify,
+      verifyError,
+    };
     status.value = `Content removed from ${byPage.size} page(s). Save to keep it.`;
   } catch (e) {
     error.value = String(e);
@@ -1670,6 +1713,65 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="redactReport && doc" class="protect-modal" @pointerdown.self="redactReport = null">
+      <div class="protect-card scan-card">
+        <h2>Redaction report</h2>
+        <p class="protect-hint">
+          {{ reportRemovedTotal }} object(s) permanently removed across
+          {{ redactReport.pages }} page(s) — {{ redactReport.removedText }} text,
+          {{ redactReport.removedImages }} image(s), {{ redactReport.removedOther }} other.
+        </p>
+
+        <template v-if="redactReport.verify">
+          <p :class="redactReport.verify.leftover.length ? 'report-bad' : 'report-ok'">
+            {{ redactReport.verify.leftover.length
+              ? "⚠ Text is still extractable under a redacted area — do NOT send this file:"
+              : "✓ Verified: nothing under the redacted areas is selectable or extractable anymore." }}
+          </p>
+          <ul v-if="redactReport.verify.leftover.length" class="report-list">
+            <li v-for="(l, i) in redactReport.verify.leftover" :key="'lo' + i">
+              p.{{ l.page + 1 }} — {{ l.sample }}
+            </li>
+          </ul>
+
+          <p :class="redactReport.verify.remaining_matches.length ? 'report-warn' : 'report-ok'">
+            {{ redactReport.verify.remaining_matches.length
+              ? `⚠ A fresh scan still finds ${redactReport.verify.remaining_matches.length} sensitive pattern(s) elsewhere in the document — left unmarked or never scanned:`
+              : "✓ Verified: a fresh scan of the whole document finds no SSNs, emails, card numbers, or phone numbers." }}
+          </p>
+          <ul v-if="redactReport.verify.remaining_matches.length" class="report-list">
+            <li v-for="(m, i) in redactReport.verify.remaining_matches" :key="'rm' + i">
+              <span class="scan-kind">{{ m.kind }}</span>
+              <span class="scan-sample">{{ m.sample }}</span>
+              <span class="scan-page">p.{{ m.page + 1 }}</span>
+            </li>
+          </ul>
+        </template>
+        <p v-else class="error">Verification could not run: {{ redactReport.verifyError }}</p>
+
+        <div class="report-checklist">
+          <p><strong>Before you send this file, check yourself:</strong></p>
+          <ul>
+            <li>Save first — the file on disk only changes when you save.</li>
+            <li>Document properties (title, author, other metadata) are not scanned.</li>
+            <li>
+              The scan reads the text layer only — words inside pictures or un-OCR'd
+              scanned pages are invisible to it. Run OCR first on scanned documents,
+              then re-scan.
+            </li>
+          </ul>
+        </div>
+
+        <div class="protect-actions">
+          <button type="button" @click="redactReport = null">Close</button>
+          <span class="spacer"></span>
+          <button class="primary" :disabled="!dirty || busy" @click="((redactReport = null), saveNow())">
+            Save now
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="compareOpen" class="protect-modal" @pointerdown.self="compareOpen = false">
       <div class="protect-card scan-card compare-card">
         <h2>Compare with {{ compareOtherName }}</h2>
@@ -2671,4 +2773,28 @@ button.active {
 .error { color: var(--danger); }
 .status { color: var(--ok); }
 .inline-error { margin: 0; font-size: 0.85rem; }
+
+/* ---- redaction report ---- */
+.report-ok { color: var(--ok); font-size: 0.85rem; margin: 0.35rem 0 0; }
+.report-warn { color: var(--warn, #c88a2b); font-size: 0.85rem; margin: 0.35rem 0 0; }
+.report-bad { color: var(--danger); font-size: 0.85rem; font-weight: 600; margin: 0.35rem 0 0; }
+.report-list {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0.3rem 0 0.1rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+.report-list li { display: flex; align-items: center; gap: 0.45rem; }
+.report-checklist {
+  border-top: 1px solid var(--chrome-line);
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.report-checklist p { margin: 0 0 0.3rem; color: var(--text); }
+.report-checklist ul { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.25rem; }
 </style>

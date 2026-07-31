@@ -90,6 +90,28 @@ export interface RedactRect {
   top: number;
 }
 
+export interface RedactOutcome {
+  objects: ObjInfo[];
+  removed_text: number;
+  removed_images: number;
+  removed_other: number;
+}
+
+export interface VerifyRegion extends RedactRect {
+  page: number;
+}
+
+export interface LeftoverText {
+  page: number;
+  sample: string; // masked
+}
+
+export interface RedactVerification {
+  regions_checked: number;
+  leftover: LeftoverText[];
+  remaining_matches: RedactMatch[];
+}
+
 export interface DiffSegment {
   op: "insert" | "delete";
   text: string;
@@ -188,7 +210,9 @@ export const api = {
   findPatterns: (id: number, kinds: string[]) =>
     invoke<RedactMatch[]>("find_patterns", { id, kinds }),
   redactRegions: (id: number, page: number, rects: RedactRect[]) =>
-    invoke<ObjInfo[]>("redact_regions", { id, page, rects }),
+    invoke<RedactOutcome>("redact_regions", { id, page, rects }),
+  verifyRedactions: (id: number, regions: VerifyRegion[], kinds: string[]) =>
+    invoke<RedactVerification>("verify_redactions", { id, regions, kinds }),
   signDocument: (
     id: number,
     pfxPath: string,

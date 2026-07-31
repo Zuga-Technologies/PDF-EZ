@@ -11,7 +11,8 @@ use std::sync::mpsc::channel;
 
 use pdf_worker::{
     AnnotInfo, CompressOutcome, DocInfo, FieldInfo, ObjInfo, PageDiff, PdfRequest, PdfWorkerHandle,
-    RedactMatch, RedactRect, RenderedPage, Rgba, SearchHit,
+    RedactMatch, RedactOutcome, RedactRect, RedactVerification, RenderedPage, Rgba, SearchHit,
+    VerifyRegion,
 };
 use tauri::Manager;
 
@@ -331,8 +332,18 @@ async fn redact_regions(
     id: u32,
     page: u16,
     rects: Vec<RedactRect>,
-) -> Result<Vec<ObjInfo>, String> {
+) -> Result<RedactOutcome, String> {
     engine_call(app, move |reply| PdfRequest::RedactRegions { id, page, rects, reply }).await
+}
+
+#[tauri::command]
+async fn verify_redactions(
+    app: tauri::AppHandle,
+    id: u32,
+    regions: Vec<VerifyRegion>,
+    kinds: Vec<String>,
+) -> Result<RedactVerification, String> {
+    engine_call(app, move |reply| PdfRequest::VerifyRedactions { id, regions, kinds, reply }).await
 }
 
 #[tauri::command]
@@ -498,6 +509,7 @@ pub fn run() {
             delete_annotation,
             find_patterns,
             redact_regions,
+            verify_redactions,
             sign_document,
             sign_document_store,
             list_windows_certs,

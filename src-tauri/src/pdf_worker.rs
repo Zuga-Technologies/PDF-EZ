@@ -107,6 +107,47 @@ pub struct RedactRect {
     pub top: f32,
 }
 
+/// What a redaction pass actually deleted, plus the page's remaining objects
+/// (the same list the edit tool consumes to refresh its overlay).
+#[derive(Serialize, Clone)]
+pub struct RedactOutcome {
+    pub objects: Vec<ObjInfo>,
+    pub removed_text: u32,
+    pub removed_images: u32,
+    pub removed_other: u32,
+}
+
+/// An applied redaction region to re-check, in display space.
+#[derive(serde::Deserialize, Clone, Copy)]
+pub struct VerifyRegion {
+    pub page: u16,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+/// Text still extractable under an applied redaction rect. Removal deletes
+/// whole objects, so this should always be empty — any entry is a redaction
+/// failure the user must see before sending the file.
+#[derive(Serialize, Clone)]
+pub struct LeftoverText {
+    pub page: u16,
+    /// Masked, same as the pattern-sweep preview — the report never re-prints
+    /// what it just tried to remove.
+    pub sample: String,
+}
+
+/// Post-redaction proof: what the engine re-checked after content was removed.
+#[derive(Serialize, Clone)]
+pub struct RedactVerification {
+    pub regions_checked: u32,
+    pub leftover: Vec<LeftoverText>,
+    /// Full-document pattern re-sweep. Non-empty means sensitive-looking data
+    /// is still in the file — either deliberately left or never marked.
+    pub remaining_matches: Vec<RedactMatch>,
+}
+
 /// One word-level change in a page's text, aligned to the other document's
 /// same-index page. "equal" runs are omitted from the wire payload — the UI
 /// only needs to render what changed.
@@ -367,7 +408,16 @@ pub enum PdfRequest {
         id: u32,
         page: u16,
         rects: Vec<RedactRect>,
-        reply: Sender<Result<Vec<ObjInfo>, String>>,
+        reply: Sender<Result<RedactOutcome, String>>,
+    },
+    /// Re-check applied redactions: extract any text still under the given
+    /// rects and re-run the full pattern sweep. Read-only — this is the proof
+    /// pass behind the post-redaction report.
+    VerifyRedactions {
+        id: u32,
+        regions: Vec<VerifyRegion>,
+        kinds: Vec<String>,
+        reply: Sender<Result<RedactVerification, String>>,
     },
     /// PAdES B-B digital signature. Writes the signed PDF to `out` and reloads
     /// it as the in-memory document.
@@ -608,6 +658,9 @@ pub fn spawn(resource_dir: Option<PathBuf>) -> PdfWorkerHandle {
                     PdfRequest::RedactRegions { id, page, rects, reply } => {
                         let _ = reply.send(redact_regions(&mut docs, id, page, &rects));
                     }
+                    PdfRequest::VerifyRedactions { id, regions, kinds, reply } => {
+                        let _ = reply.send(verify_redactions(&docs, id, &regions, &kinds));
+                    }
                     PdfRequest::SignDocument {
                         id, identity, reason, name, location, out, reply,
                     } => {
@@ -661,6 +714,7 @@ fn fail(req: PdfRequest, err: &str) {
         PdfRequest::DeleteAnnotation { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::FindPatterns { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::RedactRegions { reply, .. } => drop(reply.send(Err(e))),
+        PdfRequest::VerifyRedactions { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::SignDocument { reply, .. } => drop(reply.send(Err(e))),
         PdfRequest::AddTrustedTimestamp { reply, .. } => drop(reply.send(Err(e))),
     }
@@ -2114,14 +2168,20 @@ fn redact_regions(
     id: u32,
     page_index: u16,
     rects: &[RedactRect],
-) -> Result<Vec<ObjInfo>, String> {
+) -> Result<RedactOutcome, String> {
     let entry = docs.get_mut(&id).ok_or("Document is not open")?;
     if rects.is_empty() {
-        return obj_infos(&entry.doc, page_index);
+        return Ok(RedactOutcome {
+            objects: obj_infos(&entry.doc, page_index)?,
+            removed_text: 0,
+            removed_images: 0,
+            removed_other: 0,
+        });
     }
 
-    // Display-space rects → page space, and collect the objects they touch.
-    let (page_rects, to_remove) = {
+    // Display-space rects → page space, and collect the objects they touch —
+    // counted by kind, so the report can say what was actually deleted.
+    let (page_rects, to_remove, removed_text, removed_images, removed_other) = {
         let page = entry
             .doc
             .pages()
@@ -2133,14 +2193,22 @@ fn redact_regions(
             .map(|r| rect_to_page(ctx, r.left, r.bottom, r.right, r.top))
             .collect();
         let mut to_remove: Vec<u16> = Vec::new();
+        let (mut n_text, mut n_img, mut n_other) = (0u32, 0u32, 0u32);
         for (i, object) in page.objects().iter().enumerate() {
             let Ok(b) = object.bounds() else { continue };
             let ob = (b.left().value, b.bottom().value, b.right().value, b.top().value);
             if page_rects.iter().any(|&r| rects_intersect(r, ob)) {
                 to_remove.push(i as u16);
+                if object.as_text_object().is_some() {
+                    n_text += 1;
+                } else if object.as_image_object().is_some() {
+                    n_img += 1;
+                } else {
+                    n_other += 1;
+                }
             }
         }
-        (page_rects, to_remove)
+        (page_rects, to_remove, n_text, n_img, n_other)
     };
 
     // Build the black cover boxes before taking the page mutably (each borrows
@@ -2188,7 +2256,62 @@ fn redact_regions(
         }
         page.regenerate_content().map_err(|e| format!("Could not update the page: {e}"))?;
     }
-    obj_infos(&entry.doc, page_index)
+    Ok(RedactOutcome {
+        objects: obj_infos(&entry.doc, page_index)?,
+        removed_text,
+        removed_images,
+        removed_other,
+    })
+}
+
+/// The proof pass behind the post-redaction report: walk every character on
+/// each redacted page and flag any glyph still positioned inside an applied
+/// rect, then re-run the pattern sweep over the whole document. Read-only.
+fn verify_redactions(
+    docs: &HashMap<u32, OpenDoc>,
+    id: u32,
+    regions: &[VerifyRegion],
+    kinds: &[String],
+) -> Result<RedactVerification, String> {
+    let doc = &docs.get(&id).ok_or("Document is not open")?.doc;
+
+    let mut pages: Vec<u16> = regions.iter().map(|r| r.page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+
+    let mut leftover = Vec::new();
+    for page_index in pages {
+        let page = doc
+            .pages()
+            .get(page_index.into())
+            .map_err(|e| format!("Page {page_index} not found: {e}"))?;
+        let ctx = space_ctx(&page);
+        let page_rects: Vec<(f32, f32, f32, f32)> = regions
+            .iter()
+            .filter(|r| r.page == page_index)
+            .map(|r| rect_to_page(ctx, r.left, r.bottom, r.right, r.top))
+            .collect();
+        let Ok(text) = page.text() else { continue };
+        let mut found = String::new();
+        for c in text.chars().iter() {
+            let Some(ch) = c.unicode_char() else { continue };
+            let Ok(b) = c.tight_bounds() else { continue };
+            let cb = (b.left().value, b.bottom().value, b.right().value, b.top().value);
+            if page_rects.iter().any(|&r| rects_intersect(r, cb)) {
+                found.push(ch);
+            }
+        }
+        let trimmed = found.trim();
+        if !trimmed.is_empty() {
+            leftover.push(LeftoverText { page: page_index, sample: mask_sample(trimmed) });
+        }
+    }
+
+    Ok(RedactVerification {
+        regions_checked: regions.len() as u32,
+        leftover,
+        remaining_matches: find_patterns(docs, id, kinds)?,
+    })
 }
 
 /// Cap on returned matches so a pathological document can't build an unbounded
@@ -2710,9 +2833,41 @@ mod tests {
             ssn.sample
         );
 
-        // Redact the SSN's rectangle.
+        // Redact the SSN's rectangle; the outcome reports the deleted text run.
         let rect = RedactRect { left: ssn.left, bottom: ssn.bottom, right: ssn.right, top: ssn.top };
-        redact_regions(&mut docs, info.id, ssn.page, &[rect]).unwrap();
+        let outcome = redact_regions(&mut docs, info.id, ssn.page, &[rect]).unwrap();
+        assert!(outcome.removed_text >= 1, "outcome must report the removed text run");
+
+        // The proof pass agrees: nothing extractable under the rect, and the
+        // re-sweep still sees the email (left unredacted) but no SSN.
+        let region = VerifyRegion {
+            page: ssn.page,
+            left: ssn.left,
+            bottom: ssn.bottom,
+            right: ssn.right,
+            top: ssn.top,
+        };
+        let proof = verify_redactions(
+            &docs,
+            info.id,
+            &[region],
+            &["SSN".to_string(), "Email".to_string()],
+        )
+        .unwrap();
+        assert_eq!(proof.regions_checked, 1);
+        assert!(
+            proof.leftover.is_empty(),
+            "verify found text under an applied redaction: {:?}",
+            proof.leftover.first().map(|l| &l.sample)
+        );
+        assert!(
+            !proof.remaining_matches.iter().any(|m| m.kind == "SSN"),
+            "re-sweep still finds the redacted SSN"
+        );
+        assert!(
+            proof.remaining_matches.iter().any(|m| m.kind == "Email"),
+            "re-sweep must still report the deliberately unredacted email"
+        );
 
         // In memory: the SSN is truly gone; the unrelated last line survives.
         let text_now =
