@@ -50,11 +50,31 @@ const THUMB_CSS_WIDTH = 132;
 
 // ---- annotation tools ----
 
-type Tool = "select" | "highlight" | "note" | "ink" | "edit" | "redact";
+type Tool = "select" | "highlight" | "note" | "ink" | "arrow" | "polyline" | "edit" | "redact";
 const tool = ref<Tool>("select");
 const HIGHLIGHT_COLOR = { r: 255, g: 220, b: 60, a: 128 };
 const INK_COLOR = { r: 43, g: 74, b: 203, a: 255 };
 const INK_WIDTH_PT = 2;
+const ARROW_WIDTH_PT = 3;
+const ARROW_HEAD_PT = 14; // head barb length, PDF points
+
+type Pt = [number, number];
+
+/// An arrow as ink strokes: the shaft plus two barbs at the tip. Works in any
+/// space with uniform scale (CSS px or PDF points); `head` is in that space.
+function arrowStrokes(a: Pt, b: Pt, head: number): Pt[][] {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return [[a, b]];
+  const h = Math.min(head, len * 0.6);
+  const ang = Math.atan2(dy, dx);
+  const barb = (sign: number): Pt => [
+    b[0] - h * Math.cos(ang + sign * 0.45),
+    b[1] - h * Math.sin(ang + sign * 0.45),
+  ];
+  return [[a, b], [barb(1), b, barb(-1)]];
+}
 
 interface DragState {
   page: number;
@@ -65,6 +85,8 @@ interface DragState {
   points: [number, number][]; // ink trail, CSS px
 }
 const drag = ref<DragState | null>(null);
+/// Polyline in progress: click to add points, Enter or double-click to finish.
+const polyDraft = ref<{ page: number; points: Pt[]; x: number; y: number } | null>(null);
 const noteDraft = ref<{ page: number; x: number; y: number; text: string } | null>(null);
 const undoStack: { page: number; index: number }[] = [];
 
@@ -499,6 +521,7 @@ async function deleteSelectedObj() {
 }
 
 watch(tool, (t) => {
+  polyDraft.value = null;
   if (t === "edit") {
     for (const index of visiblePages) void loadObjects(index);
   } else {
@@ -761,6 +784,7 @@ interface PendingMark {
   page: number;
   rect?: { left: number; top: number; width: number; height: number };
   points?: [number, number][];
+  strokes?: [number, number][][];
 }
 const pendingMarks = ref<PendingMark[]>([]);
 let pendingKey = 0;
@@ -1079,16 +1103,44 @@ function onPagePointerDown(event: PointerEvent, index: number) {
     noteDraft.value = { page: index, x, y, text: "" };
     return;
   }
+  if (tool.value === "polyline") {
+    const d = polyDraft.value;
+    if (d && d.page === index) d.points.push([x, y]);
+    else polyDraft.value = { page: index, points: [[x, y]], x, y };
+    return;
+  }
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
   drag.value = { page: index, startX: x, startY: y, x, y, points: [[x, y]] };
 }
 
 function onPagePointerMove(event: PointerEvent, index: number) {
+  if (polyDraft.value && polyDraft.value.page === index) {
+    const [px, py] = pagePoint(event);
+    polyDraft.value.x = px;
+    polyDraft.value.y = py;
+    return;
+  }
   if (!drag.value || drag.value.page !== index) return;
   const [x, y] = pagePoint(event);
   drag.value.x = x;
   drag.value.y = y;
   if (tool.value === "ink") drag.value.points.push([x, y]);
+}
+
+async function finishPolyline() {
+  const d = polyDraft.value;
+  polyDraft.value = null;
+  if (!d || !doc.value) return;
+  // A double-click lands two pointerdowns on the same spot; collapse repeats.
+  const pts = d.points.filter(
+    (p, i) => i === 0 || Math.hypot(p[0] - d.points[i - 1][0], p[1] - d.points[i - 1][1]) > 2,
+  );
+  if (pts.length < 2) return;
+  const stroke = pts.map(([x, y]) => cssToPdf(d.page, x, y));
+  const mark: PendingMark = { key: pendingKey++, page: d.page, points: pts };
+  await addAnnotation(d.page, mark, (id) =>
+    api.addInk(id, d.page, [stroke], INK_COLOR, INK_WIDTH_PT),
+  );
 }
 
 async function onPagePointerUp(index: number) {
@@ -1119,6 +1171,18 @@ async function onPagePointerUp(index: number) {
     const mark: PendingMark = { key: pendingKey++, page: index, points: d.points };
     await addAnnotation(index, mark, (id) =>
       api.addInk(id, index, [stroke], INK_COLOR, INK_WIDTH_PT),
+    );
+  } else if (tool.value === "arrow") {
+    if (Math.hypot(d.x - d.startX, d.y - d.startY) < 6) return; // accidental click
+    const strokes = arrowStrokes(
+      [d.startX, d.startY],
+      [d.x, d.y],
+      ARROW_HEAD_PT * POINTS_TO_CSS * zoom.value,
+    );
+    const pdfStrokes = strokes.map((st) => st.map(([x, y]) => cssToPdf(index, x, y)));
+    const mark: PendingMark = { key: pendingKey++, page: index, strokes };
+    await addAnnotation(index, mark, (id) =>
+      api.addInk(id, index, pdfStrokes, INK_COLOR, ARROW_WIDTH_PT),
     );
   } else if (tool.value === "redact") {
     const [x0, y0] = cssToPdf(index, Math.min(d.startX, d.x), Math.max(d.startY, d.y));
@@ -1422,9 +1486,13 @@ function onKeydown(e: KeyboardEvent) {
   } else if (e.ctrlKey && e.key.toLowerCase() === "z") {
     e.preventDefault();
     void undoAnnotation();
+  } else if (e.key === "Enter" && polyDraft.value) {
+    e.preventDefault();
+    void finishPolyline();
   } else if (e.key === "Escape") {
     tool.value = "select";
     drag.value = null;
+    polyDraft.value = null;
     selectedAnnot.value = null;
   } else if (e.key === "Delete" && selectedAnnot.value) {
     void deleteSelectedAnnot();
@@ -1984,6 +2052,10 @@ onBeforeUnmount(() => {
           @click="tool = tool === 'note' ? 'select' : 'note'"><Icon name="sticky-note" /></button>
         <button class="iconbtn" :class="{ active: tool === 'ink' }" title="Draw freehand (Ctrl+Z undoes)" aria-label="Draw tool"
           @click="tool = tool === 'ink' ? 'select' : 'ink'"><Icon name="pen" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'arrow' }" title="Arrow — drag from tail to tip" aria-label="Arrow tool"
+          @click="tool = tool === 'arrow' ? 'select' : 'arrow'"><Icon name="arrow-up-right" /></button>
+        <button class="iconbtn" :class="{ active: tool === 'polyline' }" title="Polyline — click points, Enter or double-click to finish" aria-label="Polyline tool"
+          @click="tool = tool === 'polyline' ? 'select' : 'polyline'"><Icon name="spline" /></button>
         <button class="iconbtn" :class="{ active: tool === 'edit' }" title="Edit — click page text to rewrite it, images to delete" aria-label="Edit tool"
           @click="tool = tool === 'edit' ? 'select' : 'edit'"><Icon name="type" /></button>
         <button class="iconbtn" :class="{ active: tool === 'redact' }" title="Redact — drag boxes over content to remove it" aria-label="Redact tool"
@@ -2019,6 +2091,7 @@ onBeforeUnmount(() => {
             @pointerdown="onPagePointerDown($event, index)"
             @pointermove="onPagePointerMove($event, index)"
             @pointerup="onPagePointerUp(index)"
+            @dblclick="tool === 'polyline' && finishPolyline()"
           >
             <img v-if="page.url" :src="page.url" :alt="`Page ${index + 1}`" draggable="false" />
             <span v-else class="pagenum">{{ index + 1 }}</span>
@@ -2035,6 +2108,16 @@ onBeforeUnmount(() => {
             ></div>
             <svg v-if="drag && drag.page === index && tool === 'ink'" class="live-ink">
               <polyline :points="drag.points.map((p) => p.join(',')).join(' ')" />
+            </svg>
+            <svg v-if="drag && drag.page === index && tool === 'arrow'" class="live-ink">
+              <polyline
+                v-for="(st, i) in arrowStrokes([drag.startX, drag.startY], [drag.x, drag.y], ARROW_HEAD_PT * POINTS_TO_CSS * zoom)"
+                :key="i"
+                :points="st.map((p) => p.join(',')).join(' ')"
+              />
+            </svg>
+            <svg v-if="polyDraft && polyDraft.page === index" class="live-ink">
+              <polyline :points="[...polyDraft.points, [polyDraft.x, polyDraft.y]].map((p) => p.join(',')).join(' ')" />
             </svg>
             <div
               v-if="drag && drag.page === index && tool === 'redact'"
@@ -2171,6 +2254,9 @@ onBeforeUnmount(() => {
               ></div>
               <svg v-if="mark.page === index && mark.points" class="live-ink">
                 <polyline :points="mark.points.map((p) => p.join(',')).join(' ')" />
+              </svg>
+              <svg v-if="mark.page === index && mark.strokes" class="live-ink">
+                <polyline v-for="(st, i) in mark.strokes" :key="i" :points="st.map((p) => p.join(',')).join(' ')" />
               </svg>
             </template>
 
